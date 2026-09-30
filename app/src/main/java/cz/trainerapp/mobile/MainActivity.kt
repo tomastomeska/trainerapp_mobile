@@ -11,6 +11,7 @@ import android.content.Context
 import android.content.Intent
 import android.content.SharedPreferences
 import android.content.pm.PackageManager
+import android.graphics.BitmapFactory
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
@@ -46,6 +47,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
@@ -55,6 +57,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.Checkbox
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
@@ -81,9 +84,15 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.autofill.ContentType
+import androidx.compose.ui.platform.LocalAutofillManager
+import androidx.compose.ui.semantics.contentType
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.StrokeCap
@@ -105,7 +114,10 @@ import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
 import androidx.core.content.ContextCompat
 import androidx.core.view.WindowCompat
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.withContext
+import org.json.JSONArray
 import org.json.JSONObject
 import java.io.BufferedReader
 import java.io.InputStreamReader
@@ -142,6 +154,8 @@ private const val PREF_LAST_PENDING = "last_pending"
 private const val PREF_LAST_EVENTS = "last_events"
 private const val PREF_LAST_UNREAD = "last_unread"
 private const val PREF_EXACT_ALARM_ASKED = "exact_alarm_asked"
+private const val PREF_FORCE_PASSWORD = "force_password_change"
+private const val PREF_PHOTO = "profile_photo"
 
 private const val API_BASE_URL = "https://www.reservio.online/api/mobile"
 private const val WEB_LOGIN_URL = "https://www.reservio.online/login.php"
@@ -269,7 +283,8 @@ data class ChatConversation(
     val icon: String,
     val isAdmin: Boolean = false,
     val unreadCount: Int = 0,
-    val initialMessages: List<ChatMessage> = emptyList()
+    val initialMessages: List<ChatMessage> = emptyList(),
+    val photoUrl: String = ""
 )
 
 private object AppVisibility {
@@ -575,6 +590,8 @@ private fun TrainerAppRoot(context: Context) {
     var trainerName by remember { mutableStateOf(prefs.getString(PREF_NAME, "") ?: "") }
     var trainerId by remember { mutableStateOf(prefs.getString(PREF_ID, "") ?: "") }
     var accountType by remember { mutableStateOf(prefs.getString(PREF_TYPE, "trainer") ?: "trainer") }
+    var forcePasswordChange by remember { mutableStateOf(prefs.getBoolean(PREF_FORCE_PASSWORD, false)) }
+    var profilePhoto by remember { mutableStateOf(prefs.getString(PREF_PHOTO, "") ?: "") }
     var lastLoginScreen by remember { mutableStateOf("trainer_login") }
 
     var athletesList by remember { mutableStateOf<List<AthleteItem>>(emptyList()) }
@@ -597,16 +614,24 @@ private fun TrainerAppRoot(context: Context) {
     }
 
     fun refreshApiData() {
-        if (token.isBlank()) return
+        if (token.isBlank() || accountType == "athlete") {
+            isLoadingData = false
+            hasLoadedOnce = true
+            return
+        }
         if (!hasLoadedOnce) isLoadingData = true
 
         fetchUserDataFromApi(
             context = context,
             token = token,
-            onSuccess = { fetchedName ->
+            onSuccess = { fetchedName, fetchedPhoto ->
                 if (fetchedName.isNotBlank()) {
                     trainerName = fetchedName
                     prefs.edit().putString(PREF_NAME, fetchedName).apply()
+                }
+                if (fetchedPhoto.isNotBlank()) {
+                    profilePhoto = fetchedPhoto
+                    prefs.edit().putString(PREF_PHOTO, fetchedPhoto).apply()
                 }
             },
             onError = {}
@@ -685,7 +710,16 @@ private fun TrainerAppRoot(context: Context) {
         }
     }
 
-    var screen by remember { mutableStateOf(if (token.isNotBlank()) "dashboard" else "home") }
+    var screen by remember {
+        mutableStateOf(
+            when {
+                token.isBlank() -> "home"
+                accountType == "athlete" && forcePasswordChange -> "athlete_password"
+                else -> "dashboard"
+            }
+        )
+    }
+    var showBetaNotice by remember { mutableStateOf(false) }
 
     when (screen) {
         "home" -> HomeScreen(
@@ -706,6 +740,7 @@ private fun TrainerAppRoot(context: Context) {
                     trainerId = id
                     token = newToken
                     accountType = "trainer"
+                    profilePhoto = jsonResp.optJSONObject("coach")?.optString("photo", "").orEmpty()
 
                     val parsedAthletes = parseAthletesFromJson(jsonResp)
                     if (parsedAthletes.isNotEmpty()) athletesList = parsedAthletes
@@ -715,8 +750,10 @@ private fun TrainerAppRoot(context: Context) {
                         .putString(PREF_TYPE, "trainer")
                         .putString(PREF_NAME, name)
                         .putString(PREF_ID, id)
+                        .putString(PREF_PHOTO, profilePhoto)
                         .apply()
 
+                    showBetaNotice = true
                     screen = "dashboard"
                 }
             )
@@ -727,7 +764,8 @@ private fun TrainerAppRoot(context: Context) {
             LoginScreen(
                 context = context,
                 subtitle = "Přihlášení pro sportovce",
-                description = "Zadejte své přihlašovací údaje sportovce.",
+                description = "Zadejte e-mail a heslo sportovce.",
+                accountType = "athlete",
                 onBack = { screen = "home" },
                 onForgotPassword = { screen = "forgot_password" },
                 onLoginSuccess = { name, id, newToken, jsonResp ->
@@ -735,26 +773,76 @@ private fun TrainerAppRoot(context: Context) {
                     trainerId = id
                     token = newToken
                     accountType = "athlete"
-
-                    val parsedAthletes = parseAthletesFromJson(jsonResp)
-                    if (parsedAthletes.isNotEmpty()) athletesList = parsedAthletes
+                    profilePhoto = jsonResp.optJSONObject("athlete")?.optString("photo", "").orEmpty()
+                    forcePasswordChange = jsonResp.optBoolean("force_password_change", false)
 
                     prefs.edit()
                         .putString(PREF_TOKEN, newToken)
                         .putString(PREF_TYPE, "athlete")
                         .putString(PREF_NAME, name)
                         .putString(PREF_ID, id)
+                        .putBoolean(PREF_FORCE_PASSWORD, forcePasswordChange)
+                        .putString(PREF_PHOTO, profilePhoto)
                         .apply()
 
-                    screen = "dashboard"
+                    if (!forcePasswordChange) showBetaNotice = true
+                    screen = if (forcePasswordChange) "athlete_password" else "dashboard"
                 }
             )
         }
 
         "forgot_password" -> ForgotPasswordScreen(context = context, onBack = { screen = lastLoginScreen })
 
-        "dashboard" -> TrainerDashboard(
+        "athlete_password" -> AthletePasswordScreen(
+            context = context,
+            token = token,
+            onChanged = {
+                forcePasswordChange = false
+                prefs.edit().putBoolean(PREF_FORCE_PASSWORD, false).apply()
+                showBetaNotice = true
+                screen = "dashboard"
+            },
+            onLogout = {
+                if (token.isNotBlank()) logoutFromApi(context, token)
+                cancelAlertSync(context)
+                prefs.edit().clear().apply()
+                token = ""
+                trainerName = ""
+                trainerId = ""
+                accountType = "trainer"
+                forcePasswordChange = false
+                screen = "home"
+            }
+        )
+
+        "dashboard" -> if (accountType == "athlete") {
+            AthleteSection(
+                screen = "dashboard",
+                name = trainerName,
+                photoUrl = profilePhoto,
+                token = token,
+                context = context,
+                onNavigate = { screen = it },
+                onLogout = {
+                    if (token.isNotBlank()) logoutFromApi(context, token)
+                    cancelAlertSync(context)
+                    prefs.edit().clear().apply()
+                    token = ""
+                    trainerName = ""
+                    trainerId = ""
+                    accountType = "trainer"
+                    profilePhoto = ""
+                    forcePasswordChange = false
+                    screen = "home"
+                },
+                onPhoto = { url ->
+                    profilePhoto = url
+                    prefs.edit().putString(PREF_PHOTO, url).apply()
+                }
+            )
+        } else TrainerDashboard(
             trainerName = trainerName,
+            photoUrl = profilePhoto,
             accountType = accountType,
             trainings = trainingsList,
             unreadChatCount = totalUnreadChatCount,
@@ -776,6 +864,7 @@ private fun TrainerAppRoot(context: Context) {
                 trainerName = ""
                 trainerId = ""
                 accountType = "trainer"
+                forcePasswordChange = false
                 athletesList = emptyList()
                 workoutSetsList = emptyList()
                 trainingsList = emptyList()
@@ -801,7 +890,18 @@ private fun TrainerAppRoot(context: Context) {
             }
         )
 
-        "calendar" -> CalendarSectionScreen(
+        "calendar" -> if (accountType == "athlete") {
+            AthleteSection(screen = "calendar", name = trainerName, photoUrl = profilePhoto, token = token, context = context, onNavigate = { screen = it }, onLogout = {
+                if (token.isNotBlank()) logoutFromApi(context, token)
+                cancelAlertSync(context)
+                prefs.edit().clear().apply()
+                token = ""
+                trainerName = ""
+                accountType = "trainer"
+                profilePhoto = ""
+                screen = "home"
+            })
+        } else CalendarSectionScreen(
             trainings = trainingsList,
             athletes = athletesList,
             venues = venuesList,
@@ -814,7 +914,18 @@ private fun TrainerAppRoot(context: Context) {
             onNavigate = { screen = it }
         )
 
-        "chat" -> ChatSectionScreen(
+        "chat" -> if (accountType == "athlete") {
+            AthleteSection(screen = "chat", name = trainerName, photoUrl = profilePhoto, token = token, context = context, onNavigate = { screen = it }, onLogout = {
+                if (token.isNotBlank()) logoutFromApi(context, token)
+                cancelAlertSync(context)
+                prefs.edit().clear().apply()
+                token = ""
+                trainerName = ""
+                accountType = "trainer"
+                profilePhoto = ""
+                screen = "home"
+            })
+        } else ChatSectionScreen(
             initialConversations = conversationsList,
             selectedConversationId = selectedChatConversationId,
             unreadChatCount = totalUnreadChatCount,
@@ -854,7 +965,42 @@ private fun TrainerAppRoot(context: Context) {
             onNavigate = { screen = it }
         )
 
+        "payments", "weight" -> if (accountType == "athlete") {
+            AthleteSection(screen = screen, name = trainerName, photoUrl = profilePhoto, token = token, context = context, onNavigate = { screen = it }, onLogout = {
+                if (token.isNotBlank()) logoutFromApi(context, token)
+                cancelAlertSync(context)
+                prefs.edit().clear().apply()
+                token = ""
+                trainerName = ""
+                accountType = "trainer"
+                profilePhoto = ""
+                screen = "home"
+            })
+        } else {
+            screen = "dashboard"
+        }
+
         else -> { screen = "dashboard" }
+    }
+
+    if (showBetaNotice) {
+        AlertDialog(
+            onDismissRequest = { showBetaNotice = false },
+            title = { AppText("Vítejte v aplikaci TrainerApp", color = TrainerAppNavy, fontSize = 18.sp, fontWeight = FontWeight.Bold) },
+            text = {
+                AppText(
+                    "Jedná se o betaverzi a zkušební provoz, prosím hlaste všechny chyby a kontrolujte si stav dat s aplikací na webu https://reservio.online",
+                    color = TrainerAppNavy,
+                    fontSize = 15.sp
+                )
+            },
+            confirmButton = {
+                Button(
+                    onClick = { showBetaNotice = false },
+                    colors = ButtonDefaults.buttonColors(containerColor = TrainerAppYellow, contentColor = TrainerAppNavy)
+                ) { AppText("Rozumím", fontWeight = FontWeight.Bold) }
+            }
+        )
     }
 }
 
@@ -908,6 +1054,7 @@ private fun LoginScreen(
     subtitle: String,
     description: String,
     onBack: () -> Unit,
+    accountType: String = "trainer",
     onForgotPassword: () -> Unit,
     onLoginSuccess: (String, String, String, JSONObject) -> Unit
 ) {
@@ -916,6 +1063,8 @@ private fun LoginScreen(
     var passwordVisible by remember { mutableStateOf(false) }
     var loading by remember { mutableStateOf(false) }
     var errorMessage by remember { mutableStateOf("") }
+    var rememberLogin by remember { mutableStateOf(true) }
+    val autofillManager = LocalAutofillManager.current
 
     Surface(modifier = Modifier.fillMaxSize(), color = TrainerAppLight) {
         Column(
@@ -941,19 +1090,21 @@ private fun LoginScreen(
             OutlinedTextField(
                 value = username,
                 onValueChange = { username = it; errorMessage = "" },
-                modifier = Modifier.fillMaxWidth(),
+                modifier = Modifier.fillMaxWidth().semantics { contentType = ContentType.Username + ContentType.EmailAddress },
                 label = { AppText("Uživatelské jméno / E-mail") },
                 singleLine = true,
-                enabled = !loading
+                enabled = !loading,
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Email)
             )
             Spacer(Modifier.height(16.dp))
             OutlinedTextField(
                 value = password,
                 onValueChange = { password = it; errorMessage = "" },
-                modifier = Modifier.fillMaxWidth(),
+                modifier = Modifier.fillMaxWidth().semantics { contentType = ContentType.Password },
                 label = { AppText("Heslo") },
                 singleLine = true,
                 enabled = !loading,
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
                 visualTransformation = if (passwordVisible) VisualTransformation.None else PasswordVisualTransformation(),
                 trailingIcon = {
                     IconButton(onClick = { passwordVisible = !passwordVisible }) {
@@ -961,7 +1112,12 @@ private fun LoginScreen(
                     }
                 }
             )
-            Spacer(Modifier.height(20.dp))
+            Spacer(Modifier.height(8.dp))
+            Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                Checkbox(checked = rememberLogin, onCheckedChange = { rememberLogin = it })
+                AppText("Neodhlašovat", color = TrainerAppNavy, fontSize = 15.sp)
+            }
+            Spacer(Modifier.height(8.dp))
             Button(
                 onClick = {
                     val cleanUser = username.trim()
@@ -970,9 +1126,10 @@ private fun LoginScreen(
                     else {
                         loading = true
                         errorMessage = ""
-                        loginToApi(username = cleanUser, password = password, context = context,
+                        loginToApi(username = cleanUser, password = password, context = context, accountType = accountType, remember = rememberLogin,
                             onSuccess = { name, id, newToken, jsonResp ->
                                 loading = false
+                                autofillManager?.commit()
                                 onLoginSuccess(name, id, newToken, jsonResp)
                             },
                             onError = { msg -> loading = false; errorMessage = msg }
@@ -1033,6 +1190,7 @@ private fun ForgotPasswordScreen(context: Context, onBack: () -> Unit) {
 @Composable
 private fun TrainerDashboard(
     trainerName: String,
+    photoUrl: String,
     accountType: String,
     trainings: List<TrainingItem>,
     unreadChatCount: Int,
@@ -1057,6 +1215,8 @@ private fun TrainerDashboard(
                 modifier = Modifier.fillMaxWidth().background(MetalHeaderBrush).padding(horizontal = 16.dp, vertical = 12.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
+                ProfilePhoto(photoUrl, trainerName, 42.dp)
+                Spacer(Modifier.width(10.dp))
                 Column(Modifier.weight(1f)) {
                     AppText(trainerName.ifBlank { "Uživatel" }, color = Color.White, fontSize = 20.sp, fontWeight = FontWeight.Bold)
                     AppText(if (accountType == "athlete") "sportovec" else "trenér", color = Color.White.copy(alpha = 0.72f), fontSize = 14.sp)
@@ -1274,9 +1434,7 @@ private fun AthleteCard(athlete: AthleteItem, onClick: () -> Unit) {
     ) {
         Column(Modifier.padding(16.dp)) {
             Row(modifier = Modifier.fillMaxWidth().clickable { onClick() }, verticalAlignment = Alignment.CenterVertically) {
-                Box(modifier = Modifier.size(44.dp).clip(RoundedCornerShape(12.dp)).background(MetalHeaderBrush), contentAlignment = Alignment.Center) {
-                    AppText(athlete.name.take(1).uppercase(), color = Color.White, fontSize = 18.sp, fontWeight = FontWeight.Bold)
-                }
+                ProfilePhoto(athlete.photoUrl, athlete.name, 44.dp)
                 Spacer(Modifier.width(12.dp))
                 Column(Modifier.weight(1f)) {
                     AppText(athlete.name, color = TrainerAppNavy, fontSize = 17.sp, fontWeight = FontWeight.Bold)
@@ -1304,7 +1462,7 @@ private fun AthleteDetailDialog(
         onDismissRequest = onDismiss,
         title = {
             Row(verticalAlignment = Alignment.CenterVertically) {
-                AppText("👤", fontSize = 24.sp)
+                ProfilePhoto(detail.photoUrl, detail.name, 36.dp)
                 Spacer(Modifier.width(10.dp))
                 AppText(detail.name, color = TrainerAppNavy, fontSize = 20.sp, fontWeight = FontWeight.Bold)
             }
@@ -2420,7 +2578,7 @@ private fun httpRequest(
 
 private fun tokenQuery(token: String): String = URLEncoder.encode(token, "UTF-8")
 
-private fun fetchUserDataFromApi(context: Context, token: String, onSuccess: (String) -> Unit, onError: (String) -> Unit) {
+private fun fetchUserDataFromApi(context: Context, token: String, onSuccess: (String, String) -> Unit, onError: (String) -> Unit) {
     if (token.isBlank()) return
     runInBackground {
         try {
@@ -2432,7 +2590,8 @@ private fun fetchUserDataFromApi(context: Context, token: String, onSuccess: (St
             }
             val coachObj = json.optJSONObject("coach") ?: json.optJSONObject("user")
             val name = coachObj?.optString("name", "") ?: json.optString("name", "")
-            runOnMain { onSuccess(name) }
+            val photo = coachObj?.optString("photo", "") ?: ""
+            runOnMain { onSuccess(name, photo) }
         } catch (e: Exception) {
             runOnMain { onError(friendlyNetworkError(e)) }
         }
@@ -2689,6 +2848,7 @@ private fun webPalette(key: String): EventColors = when (key) {
 }
 
 private fun webEventColors(ev: TrainingItem): EventColors {
+    if (ev.athleteId < 0) return EventColors(Color(0xFF1F2937), Color.White)
     if (ev.isLocked) return EventColors(Color(0xFFD6D3CC), TrainerAppNavy)
     if (ev.approvalStatus.equals("pending", ignoreCase = true)) return webPalette("orange")
     if (ev.athleteId > 0 && ev.secondAthleteId > 0) return webPalette("blue")
@@ -3117,7 +3277,7 @@ private fun fetchChatConversationsFromApi(context: Context, token: String, onSuc
                     val unreadCount = obj.optInt("unread_count", 0)
                     val lastMsg = obj.optString("last_message", "")
                     val lastTime = obj.optString("last_time", "")
-                    items.add(ChatConversation(id, name, subtitle, icon, isAdmin, unreadCount, if (lastMsg.isNotBlank()) listOf(ChatMessage("1", if (isAdmin) "Administrátor" else name, false, false, lastMsg, lastTime)) else emptyList()))
+                    items.add(ChatConversation(id, name, subtitle, icon, isAdmin, unreadCount, if (lastMsg.isNotBlank()) listOf(ChatMessage("1", if (isAdmin) "Administrátor" else name, false, false, lastMsg, lastTime)) else emptyList(), obj.optString("photo", "")))
                 }
             }
             runOnMain { onSuccess(items) }
@@ -3253,14 +3413,97 @@ private fun startTrainingApi(
     }
 }
 
-private fun loginToApi(username: String, password: String, context: Context, onSuccess: (String, String, String, JSONObject) -> Unit, onError: (String) -> Unit) {
+@Composable
+private fun AthletePasswordScreen(
+    context: Context,
+    token: String,
+    onChanged: () -> Unit,
+    onLogout: () -> Unit
+) {
+    var currentPassword by remember { mutableStateOf("") }
+    var newPassword by remember { mutableStateOf("") }
+    var confirmPassword by remember { mutableStateOf("") }
+    var loading by remember { mutableStateOf(false) }
+    var errorMessage by remember { mutableStateOf("") }
+
+    Surface(modifier = Modifier.fillMaxSize(), color = TrainerAppLight) {
+        Column(
+            modifier = Modifier.fillMaxSize().statusBarsPadding().navigationBarsPadding().verticalScroll(rememberScrollState()).padding(18.dp)
+        ) {
+            AppText("Nastavte nové heslo", color = TrainerAppNavy, fontSize = 24.sp, fontWeight = FontWeight.Bold)
+            Spacer(Modifier.height(8.dp))
+            AppText("Při prvním přihlášení je potřeba heslo změnit. Musí mít alespoň 8 znaků.", color = TrainerAppGray, fontSize = 14.sp)
+            Spacer(Modifier.height(18.dp))
+            OutlinedTextField(value = currentPassword, onValueChange = { currentPassword = it; errorMessage = "" }, modifier = Modifier.fillMaxWidth(), label = { AppText("Aktuální heslo") }, singleLine = true, visualTransformation = PasswordVisualTransformation(), enabled = !loading)
+            Spacer(Modifier.height(12.dp))
+            OutlinedTextField(value = newPassword, onValueChange = { newPassword = it; errorMessage = "" }, modifier = Modifier.fillMaxWidth(), label = { AppText("Nové heslo") }, singleLine = true, visualTransformation = PasswordVisualTransformation(), enabled = !loading)
+            Spacer(Modifier.height(12.dp))
+            OutlinedTextField(value = confirmPassword, onValueChange = { confirmPassword = it; errorMessage = "" }, modifier = Modifier.fillMaxWidth(), label = { AppText("Potvrzení nového hesla") }, singleLine = true, visualTransformation = PasswordVisualTransformation(), enabled = !loading)
+            if (errorMessage.isNotBlank()) {
+                Spacer(Modifier.height(12.dp))
+                AppText(errorMessage, color = Color(0xFFB00020), fontSize = 14.sp)
+            }
+            Spacer(Modifier.height(18.dp))
+            Button(
+                onClick = {
+                    when {
+                        currentPassword.isEmpty() || newPassword.isEmpty() || confirmPassword.isEmpty() -> errorMessage = "Vyplňte všechna pole."
+                        newPassword.length < 8 -> errorMessage = "Nové heslo musí mít alespoň 8 znaků."
+                        newPassword != confirmPassword -> errorMessage = "Nová hesla se neshodují."
+                        else -> {
+                            loading = true
+                            errorMessage = ""
+                            changeAthletePasswordApi(context, token, currentPassword, newPassword, confirmPassword,
+                                onSuccess = { loading = false; onChanged() },
+                                onError = { message -> loading = false; errorMessage = message }
+                            )
+                        }
+                    }
+                },
+                enabled = !loading,
+                modifier = Modifier.fillMaxWidth().height(54.dp),
+                colors = ButtonDefaults.buttonColors(containerColor = TrainerAppYellow, contentColor = TrainerAppNavy)
+            ) {
+                if (loading) CircularProgressIndicator(modifier = Modifier.size(22.dp), color = TrainerAppNavy, strokeWidth = 3.dp)
+                else AppText("Uložit nové heslo", fontWeight = FontWeight.Bold)
+            }
+            Spacer(Modifier.height(8.dp))
+            TextButton(onClick = onLogout, modifier = Modifier.fillMaxWidth()) { AppText("Odhlásit", color = TrainerAppNavy) }
+        }
+    }
+}
+
+private fun changeAthletePasswordApi(context: Context, token: String, currentPassword: String, newPassword: String, confirmPassword: String, onSuccess: () -> Unit, onError: (String) -> Unit) {
+    runInBackground {
+        try {
+            val jsonBody = JSONObject().apply {
+                put("current_password", currentPassword)
+                put("new_password", newPassword)
+                put("new_password_confirm", confirmPassword)
+            }
+            val result = httpRequest(context, "athlete_password.php?token=${tokenQuery(token)}", "POST", token, jsonBody)
+            val json = result.jsonOrNull()
+            if (result.code in 200..299 && json?.optBoolean("success", false) == true) {
+                runOnMain { onSuccess() }
+            } else {
+                runOnMain { onError(apiErrorText(result, "Heslo se nepodařilo změnit.")) }
+            }
+        } catch (e: Exception) {
+            runOnMain { onError(friendlyNetworkError(e)) }
+        }
+    }
+}
+
+private fun loginToApi(username: String, password: String, context: Context, accountType: String = "trainer", remember: Boolean = true, onSuccess: (String, String, String, JSONObject) -> Unit, onError: (String) -> Unit) {
     runInBackground {
         try {
             val jsonBody = JSONObject().apply {
                 put("username", username)
                 put("password", password)
+                put("remember", remember)
             }
-            val result = httpRequest(context, "login.php", "POST", jsonBody = jsonBody)
+            val path = if (accountType == "athlete") "athlete_login.php" else "login.php"
+            val result = httpRequest(context, path, "POST", jsonBody = jsonBody)
             val json = result.jsonOrNull()
             if (json == null) {
                 runOnMain { onError(apiErrorText(result, "Server vrátil prázdnou odpověď.")) }
@@ -3270,9 +3513,9 @@ private fun loginToApi(username: String, password: String, context: Context, onS
                 runOnMain { onError(json.optString("error", "Nesprávné uživatelské jméno nebo heslo.")) }
                 return@runInBackground
             }
-            val coach = json.optJSONObject("coach") ?: json.optJSONObject("user")
+            val coach = json.optJSONObject("athlete") ?: json.optJSONObject("coach") ?: json.optJSONObject("user")
             val name = coach?.optString("name", "")?.takeIf { it.isNotBlank() } ?: json.optString("name", username)
-            val id = coach?.optString("id", "")?.takeIf { it.isNotBlank() } ?: json.optString("id", "")
+            val id = coach?.opt("id")?.toString()?.takeIf { it.isNotBlank() && it != "null" } ?: json.optString("id", "")
             val newToken = json.optString("token", "")
             if (newToken.isBlank()) {
                 runOnMain { onError("Přihlášení proběhlo, ale server nevrátil token.") }
@@ -3361,6 +3604,1462 @@ private fun DashboardTile(icon: String, title: String, modifier: Modifier, badge
         }
     }
 }
+
+private data class AthleteUpcoming(
+    val title: String,
+    val location: String,
+    val startsAt: String,
+    val endsAt: String,
+    val status: String
+)
+
+private data class AthleteSlot(
+    val id: Int,
+    val title: String,
+    val location: String,
+    val startsAt: String,
+    val endsAt: String,
+    val dateLabel: String,
+    val timeLabel: String,
+    val status: String,
+    val mine: Boolean,
+    val foreign: Boolean,
+    val canChange: Boolean,
+    val canCancel: Boolean,
+    val canEdit: Boolean,
+    val locked: Boolean,
+    val startHour: Int,
+    val endHour: Int,
+    val seriesId: String
+)
+
+private data class AthleteChatLine(val id: Int, val body: String, val createdAt: String, val mine: Boolean)
+private data class AthletePayTraining(
+    val title: String,
+    val location: String,
+    val startsAt: String,
+    val endsAt: String,
+    val paired: Boolean,
+    val makeup: Boolean,
+    val amount: String,
+    val note: String
+)
+
+private data class AthletePayRow(
+    val month: String,
+    val sessions: Int,
+    val amount: String,
+    val status: String,
+    val paidAt: String,
+    val trainings: List<AthletePayTraining> = emptyList()
+)
+private data class AthleteWeightRow(val measuredAt: String, val weightKg: Float)
+
+private fun athletePortal(
+    context: Context,
+    token: String,
+    action: String,
+    method: String = "GET",
+    body: JSONObject? = null,
+    extraQuery: String = ""
+): HttpResult {
+    val path = buildString {
+        append("athlete_portal.php?action=")
+        append(URLEncoder.encode(action, "UTF-8"))
+        append("&token=")
+        append(tokenQuery(token))
+        if (extraQuery.isNotBlank()) {
+            append("&")
+            append(extraQuery)
+        }
+    }
+    return httpRequest(context, path, method = method, token = token, jsonBody = body)
+}
+
+private fun athleteRange(start: String, end: String): String {
+    val day = start.take(10).split("-")
+    val label = if (day.size == 3) {
+        "${day[2].toIntOrNull() ?: day[2]}. ${day[1].toIntOrNull() ?: day[1]}. ${day[0]}"
+    } else {
+        start.take(10)
+    }
+    val from = start.drop(11).take(5)
+    val to = end.drop(11).take(5)
+    return if (from.isBlank()) label else "$label   $from–$to"
+}
+
+private fun athleteStatusLabel(status: String): String = when (status) {
+    "pending" -> "Ke schválení"
+    "approved" -> "Naplánováno"
+    else -> if (status.isBlank()) "" else status
+}
+
+private fun athletePaymentStatus(status: String): Pair<String, Color> = when (status) {
+    "paid" -> "Uhrazeno" to Color(0xFF15803D)
+    "pending" -> "Čeká na úhradu" to Color(0xFFB45309)
+    else -> "Čeká na vystavení výzvy" to TrainerAppGray
+}
+
+private fun athleteMoney(value: Double, missing: Boolean): String {
+    if (missing) return "—"
+    return if (value % 1.0 == 0.0) "${value.toInt()} Kč" else String.format(Locale.forLanguageTag("cs-CZ"), "%.2f Kč", value)
+}
+
+private fun athleteMonthLabel(raw: String): String {
+    val normalized = if (raw.length == 7) "$raw-01" else raw.take(10)
+    val parsed = runCatching { SimpleDateFormat("yyyy-MM-dd", Locale.US).parse(normalized) }.getOrNull() ?: return raw
+    val label = SimpleDateFormat("LLLL yyyy", Locale.forLanguageTag("cs-CZ")).format(parsed)
+    return label.replaceFirstChar { if (it.isLowerCase()) it.titlecase(Locale.forLanguageTag("cs-CZ")) else it.toString() }
+}
+
+@Composable
+private fun ProfilePhoto(url: String, name: String, size: Dp) {
+    val fullUrl = when {
+        url.isBlank() -> ""
+        url.startsWith("http://") || url.startsWith("https://") -> url
+        url.startsWith("/") -> "https://www.reservio.online$url"
+        else -> "https://www.reservio.online/$url"
+    }
+    var bitmap by remember(fullUrl) { mutableStateOf<ImageBitmap?>(null) }
+    LaunchedEffect(fullUrl) {
+        bitmap = if (fullUrl.isBlank()) {
+            null
+        } else {
+            withContext(Dispatchers.IO) {
+                try {
+                    val connection = (URL(fullUrl).openConnection() as HttpURLConnection).apply {
+                        connectTimeout = 8000
+                        readTimeout = 8000
+                        instanceFollowRedirects = true
+                    }
+                    connection.inputStream.use { BitmapFactory.decodeStream(it)?.asImageBitmap() }
+                } catch (_: Exception) {
+                    null
+                }
+            }
+        }
+    }
+    val letter = name.trim().take(1).uppercase().ifBlank { "?" }
+    Box(
+        modifier = Modifier.size(size).clip(CircleShape).background(MetalHeaderBrush),
+        contentAlignment = Alignment.Center
+    ) {
+        val loaded = bitmap
+        if (loaded != null) {
+            Image(bitmap = loaded, contentDescription = name, modifier = Modifier.fillMaxSize().clip(CircleShape), contentScale = ContentScale.Crop)
+        } else {
+            AppText(letter, color = Color.White, fontSize = 16.sp, fontWeight = FontWeight.Bold)
+        }
+    }
+}
+
+@Composable
+private fun AthleteSection(
+    screen: String,
+    name: String,
+    photoUrl: String,
+    token: String,
+    context: Context,
+    onNavigate: (String) -> Unit,
+    onLogout: () -> Unit,
+    onPhoto: (String) -> Unit = {}
+) {
+    var shownPhoto by remember(photoUrl) { mutableStateOf(photoUrl) }
+    var unread by remember { mutableIntStateOf(0) }
+    var adminUnread by remember { mutableIntStateOf(0) }
+    var coachUnread by remember { mutableIntStateOf(0) }
+    var upcoming by remember { mutableStateOf<List<AthleteUpcoming>>(emptyList()) }
+    var latestWeight by remember { mutableStateOf("") }
+    var coachName by remember { mutableStateOf("Trenér") }
+    var coachPhoto by remember { mutableStateOf("") }
+    var homeLoading by remember { mutableStateOf(true) }
+    var homeError by remember { mutableStateOf("") }
+    var homeTick by remember { mutableIntStateOf(0) }
+
+    LaunchedEffect(homeTick, token) {
+        if (token.isBlank()) return@LaunchedEffect
+        homeLoading = true
+        withContext(Dispatchers.IO) {
+            try {
+                val result = athletePortal(context, token, "home")
+                val json = result.jsonOrNull()
+                if (result.code !in 200..299 || json == null || !json.optBoolean("success", false)) {
+                    runOnMain {
+                        homeError = apiErrorText(result, "Přehled se nepodařilo načíst.")
+                        homeLoading = false
+                    }
+                    return@withContext
+                }
+                val photo = json.optJSONObject("athlete")?.optString("photo", "").orEmpty()
+                val coach = json.optJSONObject("coach")
+                val weight = json.optJSONObject("weight")
+                val weightText = if (weight == null) "" else "${weight.optDouble("weight_kg")} kg · ${weight.optString("measured_at", "").take(10)}"
+                val items = json.optJSONArray("upcoming").toUpcoming()
+                val adminUnreadCount = json.optInt("admin_unread", 0)
+                val coachUnreadCount = json.optInt("coach_unread", json.optInt("unread_chat", 0))
+                val unreadCount = adminUnreadCount + coachUnreadCount
+                runOnMain {
+                    upcoming = items
+                    unread = unreadCount
+                    adminUnread = adminUnreadCount
+                    coachUnread = coachUnreadCount
+                    latestWeight = weightText
+                    if (coach != null) {
+                        val fetchedCoach = coach.optString("name", "").trim()
+                        if (fetchedCoach.isNotBlank()) coachName = fetchedCoach
+                        coachPhoto = coach.optString("photo", "")
+                    }
+                    homeError = ""
+                    homeLoading = false
+                    if (photo.isNotBlank() && photo != shownPhoto) {
+                        shownPhoto = photo
+                        onPhoto(photo)
+                    }
+                }
+            } catch (e: Exception) {
+                runOnMain {
+                    homeError = friendlyNetworkError(e)
+                    homeLoading = false
+                }
+            }
+        }
+    }
+
+    Surface(modifier = Modifier.fillMaxSize(), color = TrainerAppLight) {
+        Column(modifier = Modifier.fillMaxSize().statusBarsPadding().navigationBarsPadding()) {
+            Row(
+                modifier = Modifier.fillMaxWidth().background(MetalHeaderBrush).padding(horizontal = 16.dp, vertical = 12.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                ProfilePhoto(shownPhoto, name, 42.dp)
+                Spacer(Modifier.width(10.dp))
+                Column(Modifier.weight(1f)) {
+                    AppText(name.ifBlank { "Sportovec" }, color = Color.White, fontSize = 20.sp, fontWeight = FontWeight.Bold)
+                    AppText("sportovec", color = Color.White.copy(alpha = 0.72f), fontSize = 14.sp)
+                }
+                TextButton(onClick = onLogout) { AppText("Odhlásit", color = Color.White, fontWeight = FontWeight.Bold) }
+            }
+
+            Box(modifier = Modifier.weight(1f).fillMaxWidth()) {
+                when (screen) {
+                    "calendar" -> AthleteCalendarPane(token, context)
+                    "chat" -> AthleteChatPane(token, context, coachName, coachPhoto, adminUnread, coachUnread) { admin, coach ->
+                        adminUnread = admin
+                        coachUnread = coach
+                        unread = admin + coach
+                    }
+                    "payments" -> AthletePaymentsPane(token, context)
+                    "weight" -> AthleteWeightPane(token, context) { homeTick += 1 }
+                    else -> AthleteHomePane(
+                        upcoming = upcoming,
+                        latestWeight = latestWeight,
+                        unread = unread,
+                        loading = homeLoading,
+                        error = homeError,
+                        onNavigate = onNavigate
+                    )
+                }
+            }
+
+            AthleteBottomBar(current = screen, unread = unread, onNavigate = onNavigate)
+        }
+    }
+}
+
+private fun JSONArray?.toUpcoming(): List<AthleteUpcoming> {
+    if (this == null) return emptyList()
+    return List(length()) { index ->
+        val item = getJSONObject(index)
+        AthleteUpcoming(
+            title = item.optString("title", "Trénink"),
+            location = item.optString("location", ""),
+            startsAt = item.optString("starts_at", ""),
+            endsAt = item.optString("ends_at", ""),
+            status = item.optString("approval_status", "approved")
+        )
+    }
+}
+
+@Composable
+private fun AthleteHomePane(
+    upcoming: List<AthleteUpcoming>,
+    latestWeight: String,
+    unread: Int,
+    loading: Boolean,
+    error: String,
+    onNavigate: (String) -> Unit
+) {
+    var expanded by remember { mutableStateOf(false) }
+    val first = upcoming.firstOrNull()
+    Column(modifier = Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp)) {
+        Card(
+            modifier = Modifier.fillMaxWidth().clickable(enabled = upcoming.size > 1) { expanded = !expanded },
+            colors = CardDefaults.cardColors(containerColor = MetalCard),
+            shape = RoundedCornerShape(16.dp)
+        ) {
+            Column(Modifier.padding(16.dp)) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    AppText("📅", fontSize = 22.sp)
+                    Spacer(Modifier.width(10.dp))
+                    Column(Modifier.weight(1f)) {
+                        AppText("Nejbližší trénink", color = TrainerAppNavy, fontSize = 18.sp, fontWeight = FontWeight.Bold)
+                        AppText(
+                            if (upcoming.isEmpty()) "žádný naplánovaný" else if (upcoming.size == 1) "1 naplánovaný" else "${upcoming.size} naplánované",
+                            color = TrainerAppGray,
+                            fontSize = 13.sp
+                        )
+                    }
+                    if (upcoming.size > 1) AppText(if (expanded) "▲" else "▼", color = TrainerAppNavy, fontSize = 16.sp, fontWeight = FontWeight.Bold)
+                }
+                if (loading) {
+                    Spacer(Modifier.height(12.dp))
+                    CircularProgressIndicator(color = TrainerAppNavy, modifier = Modifier.size(22.dp))
+                } else if (first == null) {
+                    Spacer(Modifier.height(8.dp))
+                    AppText("Nemáte žádný nadcházející trénink.", color = TrainerAppGray, fontSize = 13.sp)
+                } else {
+                    Spacer(Modifier.height(12.dp))
+                    AthleteUpcomingRow(first)
+                    if (expanded) {
+                        upcoming.drop(1).forEach { item ->
+                            Spacer(Modifier.height(10.dp))
+                            AthleteUpcomingRow(item)
+                        }
+                    }
+                }
+            }
+        }
+
+        if (error.isNotBlank()) {
+            Spacer(Modifier.height(12.dp))
+            Card(modifier = Modifier.fillMaxWidth(), colors = CardDefaults.cardColors(containerColor = Color(0xFFFFE3E3)), shape = RoundedCornerShape(12.dp)) {
+                AppText(error, color = Color(0xFFB00020), modifier = Modifier.padding(14.dp), fontSize = 14.sp)
+            }
+        }
+
+        Spacer(Modifier.height(22.dp))
+        AppText("Rychlý přístup", color = TrainerAppNavy, fontSize = 20.sp, fontWeight = FontWeight.Bold)
+        Spacer(Modifier.height(12.dp))
+        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+            DashboardTile("📅", "Kalendář", Modifier.weight(1f)) { onNavigate("calendar") }
+            DashboardTile("💬", "Chat", Modifier.weight(1f), badgeCount = unread) { onNavigate("chat") }
+        }
+        Spacer(Modifier.height(12.dp))
+        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+            DashboardTile("💳", "Platby", Modifier.weight(1f)) { onNavigate("payments") }
+            DashboardTile("⚖", "Váha", Modifier.weight(1f)) { onNavigate("weight") }
+        }
+
+        if (latestWeight.isNotBlank()) {
+            Spacer(Modifier.height(16.dp))
+            Card(
+                modifier = Modifier.fillMaxWidth().clickable { onNavigate("weight") },
+                colors = CardDefaults.cardColors(containerColor = MetalCard),
+                shape = RoundedCornerShape(16.dp)
+            ) {
+                Column(Modifier.padding(16.dp)) {
+                    AppText("Poslední váha", color = TrainerAppGray, fontSize = 13.sp)
+                    AppText(latestWeight, color = TrainerAppNavy, fontSize = 18.sp, fontWeight = FontWeight.Bold)
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun AthleteUpcomingRow(item: AthleteUpcoming) {
+    Column(modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(14.dp)).background(Color.White).padding(14.dp)) {
+        AppText(athleteRange(item.startsAt, item.endsAt), color = TrainerAppGray, fontSize = 13.sp)
+        AppText(item.title.ifBlank { "Trénink" }, color = TrainerAppNavy, fontSize = 16.sp, fontWeight = FontWeight.Bold)
+        if (item.location.isNotBlank()) AppText(item.location, color = TrainerAppGray, fontSize = 13.sp)
+        AppText(athleteStatusLabel(item.status), color = if (item.status == "pending") Color(0xFFC2410C) else Color(0xFF15803D), fontSize = 12.sp, fontWeight = FontWeight.Bold)
+    }
+}
+
+private fun AthleteSlot.toTraining(): TrainingItem {
+    val end = if (endHour <= startHour) startHour + 1 else endHour
+    return TrainingItem(
+        id = id.toString(),
+        time = timeLabel.ifBlank { String.format(Locale.US, "%02d:00", startHour) },
+        date = dateLabel,
+        athleteName = when {
+            locked -> title.ifBlank { "Uzamčeno" }
+            foreign -> "Obsazeno"
+            else -> title.ifBlank { "Trénink" }
+        },
+        detail = if (foreign || locked) "" else location,
+        approvalStatus = if (locked || foreign) "approved" else status,
+        isLocked = locked,
+        startHour = startHour,
+        endHour = end,
+        athleteId = if (foreign && !locked) -1 else if (mine) 1 else 0,
+        title = title,
+        location = location,
+        startsAt = startsAt,
+        endsAt = endsAt,
+        seriesId = seriesId
+    )
+}
+
+@Composable
+private fun AthleteCalendarPane(token: String, context: Context) {
+    var weekOffset by remember { mutableIntStateOf(0) }
+    val weekDays = remember(weekOffset) { getWeekDays(weekOffset) }
+    val weekHeader = remember(weekOffset) { getWeekHeaderLabel(weekOffset) }
+    val todayDateStr = remember { SimpleDateFormat("yyyy-MM-dd", Locale.US).format(Calendar.getInstance().time) }
+    val todayIndexInWeek = remember(weekDays, todayDateStr) {
+        weekDays.indexOfFirst { it.second == todayDateStr }.let { if (it < 0) 0 else it }
+    }
+    var selectedDayIndex by remember { mutableIntStateOf(todayIndexInWeek) }
+    LaunchedEffect(weekOffset) {
+        val idx = weekDays.indexOfFirst { it.second == todayDateStr }
+        selectedDayIndex = if (idx >= 0) idx else 0
+    }
+    var slots by remember { mutableStateOf<List<AthleteSlot>>(emptyList()) }
+    var venues by remember { mutableStateOf<List<VenueItem>>(emptyList()) }
+    var loading by remember { mutableStateOf(true) }
+    var error by remember { mutableStateOf("") }
+    var reload by remember { mutableIntStateOf(0) }
+    var showCreate by remember { mutableStateOf(false) }
+    var createDate by remember { mutableStateOf("") }
+    var createHour by remember { mutableIntStateOf(9) }
+    var actionSlot by remember { mutableStateOf<AthleteSlot?>(null) }
+    val hours = (5..21).toList()
+    val trainings = remember(slots) { markRescheduleOrigins(slots.map { it.toTraining() }) }
+
+    LaunchedEffect(weekOffset, reload, token) {
+        loading = true
+        val from = weekDays.firstOrNull()?.second.orEmpty()
+        val to = weekDays.lastOrNull()?.second.orEmpty()
+        withContext(Dispatchers.IO) {
+            try {
+                val extra = "from=${URLEncoder.encode(from, "UTF-8")}&to=${URLEncoder.encode(to, "UTF-8")}"
+                val result = athletePortal(context, token, "calendar", extraQuery = extra)
+                val json = result.jsonOrNull()
+                if (result.code !in 200..299 || json == null || !json.optBoolean("success", false)) {
+                    runOnMain {
+                        error = apiErrorText(result, "Kalendář se nepodařilo načíst.")
+                        loading = false
+                    }
+                    return@withContext
+                }
+                val parsed = mutableListOf<AthleteSlot>()
+                val events = json.optJSONArray("events")
+                if (events != null) {
+                    for (i in 0 until events.length()) {
+                        val item = events.getJSONObject(i)
+                        parsed.add(item.toAthleteSlot(locked = false))
+                    }
+                }
+                val locks = json.optJSONArray("locks")
+                if (locks != null) {
+                    for (i in 0 until locks.length()) {
+                        parsed.add(locks.getJSONObject(i).toAthleteSlot(locked = true))
+                    }
+                }
+                val venueItems = mutableListOf<VenueItem>()
+                val venueArray = json.optJSONArray("venues")
+                if (venueArray != null) {
+                    for (i in 0 until venueArray.length()) {
+                        val item = venueArray.getJSONObject(i)
+                        venueItems.add(VenueItem(item.optInt("id"), item.optString("name", ""), item.optString("address", "")))
+                    }
+                }
+                runOnMain {
+                    slots = parsed.sortedBy { it.startsAt }
+                    venues = venueItems
+                    error = ""
+                    loading = false
+                }
+            } catch (e: Exception) {
+                runOnMain {
+                    error = friendlyNetworkError(e)
+                    loading = false
+                }
+            }
+        }
+    }
+
+    Column(modifier = Modifier.fillMaxSize()) {
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            AppText(weekHeader, color = TrainerAppNavy, fontSize = 22.sp, fontWeight = FontWeight.Bold)
+            Spacer(Modifier.width(4.dp))
+            CompositionLocalProvider(LocalMinimumInteractiveComponentSize provides Dp.Unspecified) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Box(
+                        modifier = Modifier.size(32.dp).clip(CircleShape).clickable { weekOffset-- },
+                        contentAlignment = Alignment.Center
+                    ) { AppText("‹", color = TrainerAppNavy, fontSize = 28.sp, fontWeight = FontWeight.Bold) }
+                    Box(
+                        modifier = Modifier.size(32.dp).clip(CircleShape).clickable { weekOffset++ },
+                        contentAlignment = Alignment.Center
+                    ) { AppText("›", color = TrainerAppNavy, fontSize = 28.sp, fontWeight = FontWeight.Bold) }
+                }
+            }
+            Spacer(Modifier.weight(1f))
+            if (loading) {
+                CircularProgressIndicator(color = TrainerAppNavy, modifier = Modifier.size(18.dp))
+                Spacer(Modifier.width(8.dp))
+            }
+            Box(
+                modifier = Modifier
+                    .size(36.dp)
+                    .clip(CircleShape)
+                    .background(MetalGoldBrush)
+                    .clickable {
+                        createDate = weekDays.getOrNull(selectedDayIndex)?.second.orEmpty()
+                        createHour = 9
+                        showCreate = true
+                    },
+                contentAlignment = Alignment.Center
+            ) { AppText("+", color = TrainerAppNavy, fontSize = 24.sp, fontWeight = FontWeight.Bold) }
+        }
+
+        val pendingBlink = rememberInfiniteTransition(label = "athletePendingDot")
+        val pendingAlpha by pendingBlink.animateFloat(
+            initialValue = 1f,
+            targetValue = 0.15f,
+            animationSpec = infiniteRepeatable(tween(durationMillis = 520), RepeatMode.Reverse),
+            label = "athletePendingDotAlpha"
+        )
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(horizontal = 4.dp, vertical = 4.dp),
+            horizontalArrangement = Arrangement.SpaceBetween
+        ) {
+            weekDays.forEachIndexed { index, (dayLabel, dateStr) ->
+                val isSelected = index == selectedDayIndex
+                val isToday = dateStr == todayDateStr
+                val needsAttention = trainings.any {
+                    it.date == dateStr && !it.isLocked && (it.approvalStatus.equals("pending", true) || it.awaitingReschedule)
+                }
+                val hasEvents = trainings.any { it.date == dateStr && !it.isLocked }
+                Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.weight(1f)) {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(2.dp)
+                            .clip(RoundedCornerShape(12.dp))
+                            .background(when {
+                                isSelected -> TrainerAppYellow
+                                isToday -> Color(0xFFF3E6C4)
+                                else -> Color.Transparent
+                            })
+                            .clickable { selectedDayIndex = index }
+                            .padding(vertical = 8.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        AppText(
+                            text = dayLabel,
+                            color = TrainerAppNavy,
+                            fontSize = 12.sp,
+                            fontWeight = if (isSelected || isToday) FontWeight.Bold else FontWeight.Normal,
+                            textAlign = TextAlign.Center
+                        )
+                    }
+                    if (needsAttention || hasEvents) {
+                        Spacer(Modifier.height(3.dp))
+                        Box(
+                            modifier = Modifier
+                                .size(if (needsAttention) 8.dp else 6.dp)
+                                .clip(CircleShape)
+                                .background(
+                                    if (needsAttention) Color(0xFFD32F2F).copy(alpha = pendingAlpha)
+                                    else if (isSelected) TrainerAppNavy
+                                    else TrainerAppYellow
+                                )
+                        )
+                    }
+                }
+            }
+        }
+        if (error.isNotBlank()) {
+            AppText(error, color = Color(0xFFB00020), fontSize = 13.sp, modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp))
+        }
+        Spacer(Modifier.height(6.dp))
+        Column(modifier = Modifier.weight(1f).fillMaxWidth().verticalScroll(rememberScrollState())) {
+            val selectedDate = weekDays.getOrNull(selectedDayIndex)?.second.orEmpty()
+            hours.forEach { hour ->
+                val hourStr = String.format(Locale.getDefault(), "%02d:00", hour)
+                val hourEvents = trainings.filter { tr ->
+                    if (tr.date != selectedDate) return@filter false
+                    if (tr.startHour == tr.endHour) tr.startHour == hour else hour >= tr.startHour && hour < tr.endHour
+                }
+                Row(
+                    modifier = Modifier.fillMaxWidth().height(60.dp).border(0.5.dp, Color(0xFFE0DCD3)),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Box(modifier = Modifier.width(55.dp).padding(start = 8.dp), contentAlignment = Alignment.CenterStart) {
+                        AppText(hourStr, fontSize = 12.sp, color = TrainerAppGray)
+                    }
+                    Box(
+                        modifier = Modifier
+                            .weight(1f)
+                            .fillMaxSize()
+                            .background(Color(0xFFF2EFE8))
+                            .border(0.5.dp, Color(0xFFE0DCD3))
+                            .clickable(enabled = hourEvents.isEmpty()) {
+                                createDate = selectedDate
+                                createHour = hour
+                                showCreate = true
+                            }
+                    ) {
+                        hourEvents.forEach { ev ->
+                            CalendarSlotEvent(ev) {
+                                actionSlot = slots.firstOrNull { it.id.toString() == ev.id }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if (showCreate) {
+        AthleteReserveDialog(
+            mode = "create",
+            title = "Rezervovat termín",
+            confirm = "Rezervovat",
+            initialDate = createDate.ifBlank { weekDays.getOrNull(selectedDayIndex)?.second.orEmpty() },
+            initialHour = createHour,
+            initialMinute = 0,
+            initialLocation = "",
+            initialEventTitle = "Trénink",
+            eventId = 0,
+            venues = venues,
+            token = token,
+            context = context,
+            onDismiss = { showCreate = false },
+            onDone = {
+                showCreate = false
+                reload += 1
+            }
+        )
+    }
+    val slot = actionSlot
+    if (slot != null && slot.canEdit) {
+        AthleteReserveDialog(
+            mode = "update_request",
+            title = "Upravit požadavek",
+            confirm = "Uložit změny",
+            initialDate = slot.dateLabel,
+            initialHour = slot.startHour,
+            initialMinute = slot.timeLabel.drop(3).take(2).toIntOrNull() ?: 0,
+            initialLocation = slot.location,
+            initialEventTitle = slot.title,
+            eventId = slot.id,
+            venues = venues,
+            token = token,
+            context = context,
+            onDismiss = { actionSlot = null },
+            onDone = {
+                actionSlot = null
+                reload += 1
+            }
+        )
+    } else if (slot != null && slot.canChange) {
+        AthleteReserveDialog(
+            mode = "request_change",
+            title = "Požádat o změnu termínu",
+            confirm = "Odeslat požadavek",
+            initialDate = slot.dateLabel,
+            initialHour = slot.startHour,
+            initialMinute = slot.timeLabel.drop(3).take(2).toIntOrNull() ?: 0,
+            initialLocation = slot.location,
+            initialEventTitle = slot.title,
+            eventId = slot.id,
+            venues = venues,
+            token = token,
+            context = context,
+            onDismiss = { actionSlot = null },
+            onDone = {
+                actionSlot = null
+                reload += 1
+            }
+        )
+    } else if (slot != null && slot.canCancel) {
+        AlertDialog(
+            onDismissRequest = { actionSlot = null },
+            title = { AppText("Žádost o změnu", color = TrainerAppNavy, fontWeight = FontWeight.Bold) },
+            text = { AppText("Zrušením se smaže jen tato žádost. Původní schválený termín zůstane.", color = TrainerAppGray, fontSize = 14.sp) },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        val eventId = slot.id
+                        actionSlot = null
+                        runInBackground {
+                            try {
+                                val result = athletePortal(context, token, "cancel_request", "POST", JSONObject().put("event_id", eventId))
+                                val json = result.jsonOrNull()
+                                runOnMain {
+                                    if (json?.optBoolean("success", false) == true) reload += 1
+                                    else error = json?.optString("error", "Žádost se nepodařilo zrušit.").orEmpty()
+                                }
+                            } catch (e: Exception) {
+                                runOnMain { error = friendlyNetworkError(e) }
+                            }
+                        }
+                    },
+                    colors = ButtonDefaults.buttonColors(containerColor = TrainerAppYellow, contentColor = TrainerAppNavy)
+                ) { AppText("Zrušit žádost", fontWeight = FontWeight.Bold) }
+            },
+            dismissButton = { TextButton(onClick = { actionSlot = null }) { AppText("Zavřít") } }
+        )
+    }
+}
+
+private fun JSONObject.toAthleteSlot(locked: Boolean): AthleteSlot {
+    val starts = optString("starts_at", "")
+    val ends = optString("ends_at", "")
+    return AthleteSlot(
+        id = optInt("id"),
+        title = optString("title", if (locked) "Uzamčeno" else "Trénink"),
+        location = optString("location", ""),
+        startsAt = starts,
+        endsAt = ends,
+        dateLabel = optString("date_label", starts.take(10)),
+        timeLabel = optString("time_label", starts.drop(11).take(5)),
+        status = if (locked) "locked" else optString("approval_status", "approved"),
+        mine = optBoolean("is_mine", false),
+        foreign = if (locked) true else optBoolean("is_foreign", false),
+        canChange = optBoolean("can_request_change", false),
+        canCancel = optBoolean("can_cancel_request", false),
+        canEdit = optBoolean("can_edit", false),
+        locked = locked || optBoolean("is_locked", false),
+        startHour = optInt("start_hour", starts.drop(11).take(2).toIntOrNull() ?: 9),
+        endHour = optInt("end_hour", ends.drop(11).take(2).toIntOrNull() ?: 10),
+        seriesId = optString("series_id", "")
+    )
+}
+
+@Composable
+private fun AthleteReserveDialog(
+    mode: String,
+    title: String,
+    confirm: String,
+    initialDate: String,
+    initialHour: Int,
+    initialMinute: Int,
+    initialLocation: String,
+    initialEventTitle: String,
+    eventId: Int,
+    venues: List<VenueItem>,
+    token: String,
+    context: Context,
+    onDismiss: () -> Unit,
+    onDone: () -> Unit
+) {
+    var date by remember { mutableStateOf(initialDate) }
+    var showDatePicker by remember { mutableStateOf(false) }
+    var hour by remember { mutableIntStateOf(initialHour.coerceIn(0, 23)) }
+    var minute by remember { mutableIntStateOf(listOf(0, 15, 30, 45).minBy { kotlin.math.abs(it - initialMinute) }) }
+    var eventTitle by remember { mutableStateOf(when (initialEventTitle.trim().lowercase()) {
+        "konzultační hodina", "konzultacni hodina" -> "Konzultační hodina"
+        "jiné", "jine" -> "Jiné"
+        else -> "Trénink"
+    }) }
+    var titleMenu by remember { mutableStateOf(false) }
+    val locationChoices = remember(venues, initialLocation) {
+        val items = venues.filter { it.name.isNotBlank() }.toMutableList()
+        if (initialLocation.isNotBlank() && items.none { it.name == initialLocation }) {
+            items.add(0, VenueItem(id = -1, name = initialLocation))
+        }
+        items
+    }
+    var selectedVenue by remember(locationChoices, initialLocation) {
+        mutableStateOf(locationChoices.firstOrNull { it.name == initialLocation } ?: locationChoices.firstOrNull())
+    }
+    var venueMenu by remember { mutableStateOf(false) }
+    var busy by remember { mutableStateOf(false) }
+    var error by remember { mutableStateOf("") }
+
+    AlertDialog(
+        modifier = Modifier.imePadding(),
+        onDismissRequest = { if (!busy) onDismiss() },
+        title = { AppText(title, color = TrainerAppNavy, fontSize = 18.sp, fontWeight = FontWeight.Bold) },
+        text = {
+            Column(modifier = Modifier.verticalScroll(rememberScrollState())) {
+                AppText("Délka je vždy 60 minut.", color = TrainerAppGray, fontSize = 13.sp)
+                Spacer(Modifier.height(10.dp))
+                AppText("Datum", fontSize = 12.sp, color = TrainerAppGray)
+                Card(
+                    modifier = Modifier.fillMaxWidth().clickable { showDatePicker = true },
+                    colors = CardDefaults.cardColors(containerColor = TrainerAppLight)
+                ) {
+                    AppText(formatTrainingDate(date), modifier = Modifier.padding(12.dp), fontWeight = FontWeight.Bold, color = TrainerAppNavy)
+                }
+                if (showDatePicker) {
+                    val pickerState = rememberDatePickerState(initialSelectedDateMillis = dateStringToUtcMillis(date))
+                    DatePickerDialog(
+                        onDismissRequest = { showDatePicker = false },
+                        confirmButton = {
+                            TextButton(onClick = {
+                                pickerState.selectedDateMillis?.let { date = utcMillisToDateString(it) }
+                                showDatePicker = false
+                            }) { AppText("Vybrat", fontWeight = FontWeight.Bold) }
+                        },
+                        dismissButton = { TextButton(onClick = { showDatePicker = false }) { AppText("Zrušit") } }
+                    ) { DatePicker(state = pickerState) }
+                }
+                Spacer(Modifier.height(8.dp))
+                QuarterHourDropdown("Začátek", hour, minute, { hour = it }, { minute = it })
+                Spacer(Modifier.height(8.dp))
+                AppText("Typ události", fontSize = 12.sp, color = TrainerAppGray)
+                Box {
+                    Card(modifier = Modifier.fillMaxWidth().clickable { titleMenu = true }, colors = CardDefaults.cardColors(containerColor = TrainerAppLight)) {
+                        AppText(eventTitle, modifier = Modifier.padding(12.dp), fontWeight = FontWeight.Bold)
+                    }
+                    DropdownMenu(expanded = titleMenu, onDismissRequest = { titleMenu = false }) {
+                        listOf("Trénink", "Konzultační hodina", "Jiné").forEach { option ->
+                            DropdownMenuItem(text = { AppText(option) }, onClick = { eventTitle = option; titleMenu = false })
+                        }
+                    }
+                }
+                Spacer(Modifier.height(8.dp))
+                AppText("Místo", fontSize = 12.sp, color = TrainerAppGray)
+                Box {
+                    Card(modifier = Modifier.fillMaxWidth().clickable { venueMenu = true }, colors = CardDefaults.cardColors(containerColor = TrainerAppLight)) {
+                        AppText(selectedVenue?.name ?: "Vyberte místo", modifier = Modifier.padding(12.dp), fontWeight = FontWeight.Bold, color = TrainerAppNavy)
+                    }
+                    DropdownMenu(expanded = venueMenu, onDismissRequest = { venueMenu = false }) {
+                        if (locationChoices.isEmpty()) {
+                            DropdownMenuItem(text = { AppText("V databázi není žádné místo") }, onClick = { venueMenu = false })
+                        }
+                        locationChoices.forEach { venue ->
+                            DropdownMenuItem(text = { AppText(if (venue.address.isBlank()) venue.name else "${venue.name} - ${venue.address}") }, onClick = {
+                                selectedVenue = venue
+                                venueMenu = false
+                            })
+                        }
+                    }
+                }
+                AppText("Místo se bere z katalogu sportovišť.", color = TrainerAppGray, fontSize = 12.sp, modifier = Modifier.padding(top = 4.dp))
+                if (error.isNotBlank()) {
+                    Spacer(Modifier.height(8.dp))
+                    AppText(error, color = Color(0xFFB00020), fontSize = 13.sp)
+                }
+            }
+        },
+        confirmButton = {
+            Button(
+                onClick = {
+                    val place = selectedVenue?.name?.trim().orEmpty()
+                    if (date.isBlank()) {
+                        error = "Vyberte datum."
+                        return@Button
+                    }
+                    if (place.isBlank()) {
+                        error = "Vyberte místo z databáze."
+                        return@Button
+                    }
+                    busy = true
+                    error = ""
+                    val stamp = String.format(Locale.US, "%s %02d:%02d:00", date, hour, minute)
+                    runInBackground {
+                        try {
+                            val body = JSONObject().put("starts_at", stamp).put("location", place).put("title", eventTitle)
+                            if (eventId > 0) body.put("event_id", eventId)
+                            val result = athletePortal(context, token, mode, "POST", body)
+                            val json = result.jsonOrNull()
+                            runOnMain {
+                                busy = false
+                                if (json?.optBoolean("success", false) == true) onDone()
+                                else error = json?.optString("error", apiErrorText(result, "Termín se nepodařilo uložit.")).orEmpty()
+                            }
+                        } catch (e: Exception) {
+                            runOnMain {
+                                busy = false
+                                error = friendlyNetworkError(e)
+                            }
+                        }
+                    }
+                },
+                enabled = !busy,
+                colors = ButtonDefaults.buttonColors(containerColor = TrainerAppYellow, contentColor = TrainerAppNavy)
+            ) { AppText(confirm, fontWeight = FontWeight.Bold) }
+        },
+        dismissButton = { TextButton(onClick = onDismiss, enabled = !busy) { AppText("Zavřít") } }
+    )
+}
+
+
+@Composable
+private fun AthleteChatPane(
+    token: String,
+    context: Context,
+    coachName: String,
+    coachPhoto: String,
+    adminUnread: Int,
+    coachUnread: Int,
+    onUnread: (Int, Int) -> Unit
+) {
+    var channel by remember { mutableStateOf("") }
+    var lines by remember { mutableStateOf<List<AthleteChatLine>>(emptyList()) }
+    var draft by remember { mutableStateOf("") }
+    var loading by remember { mutableStateOf(false) }
+    var error by remember { mutableStateOf("") }
+    var reload by remember { mutableIntStateOf(0) }
+    val listState = rememberLazyListState()
+    val adminConversation = ChatConversation(
+        id = "admin",
+        name = "Administrátor TrainerApp",
+        subtitle = "Systémová podpora a administrace",
+        icon = "🛠️",
+        isAdmin = true,
+        unreadCount = adminUnread
+    )
+    val coachConversation = ChatConversation(
+        id = "coach",
+        name = coachName.ifBlank { "Trenér" },
+        subtitle = "Chat s trenérem",
+        icon = "👤",
+        unreadCount = coachUnread,
+        photoUrl = coachPhoto
+    )
+
+    LaunchedEffect(reload, token, channel) {
+        if (channel != "admin" && channel != "coach") return@LaunchedEffect
+        loading = lines.isEmpty()
+        withContext(Dispatchers.IO) {
+            try {
+                val result = athletePortal(context, token, "chat", extraQuery = "with=$channel")
+                val json = result.jsonOrNull()
+                if (result.code !in 200..299 || json == null || !json.optBoolean("success", false)) {
+                    runOnMain {
+                        error = apiErrorText(result, "Chat se nepodařilo načíst.")
+                        loading = false
+                    }
+                    return@withContext
+                }
+                val parsed = mutableListOf<AthleteChatLine>()
+                val messages = json.optJSONArray("messages")
+                if (messages != null) {
+                    for (i in 0 until messages.length()) {
+                        val item = messages.getJSONObject(i)
+                        parsed.add(AthleteChatLine(item.optInt("id"), item.optString("body", ""), item.optString("created_at", ""), item.optBoolean("is_me", false)))
+                    }
+                }
+                runOnMain {
+                    lines = parsed
+                    error = ""
+                    loading = false
+                    if (channel == "admin") onUnread(0, coachUnread) else onUnread(adminUnread, 0)
+                }
+            } catch (e: Exception) {
+                runOnMain {
+                    error = friendlyNetworkError(e)
+                    loading = false
+                }
+            }
+        }
+    }
+    LaunchedEffect(lines.size, channel) {
+        if (channel.isNotBlank() && lines.isNotEmpty()) listState.animateScrollToItem(lines.lastIndex)
+    }
+
+    if (channel.isBlank()) {
+        Column(modifier = Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp)) {
+            AppText("Administrace a podpora", color = TrainerAppNavy, fontSize = 16.sp, fontWeight = FontWeight.Bold)
+            Spacer(Modifier.height(8.dp))
+            ConversationCard(adminConversation) {
+                lines = emptyList()
+                error = ""
+                channel = "admin"
+                reload += 1
+            }
+            Spacer(Modifier.height(20.dp))
+            AppText("Chat s trenérem", color = TrainerAppNavy, fontSize = 16.sp, fontWeight = FontWeight.Bold)
+            Spacer(Modifier.height(8.dp))
+            ConversationCard(coachConversation) {
+                lines = emptyList()
+                error = ""
+                channel = "coach"
+                reload += 1
+            }
+        }
+        return
+    }
+
+    val title = if (channel == "admin") "Administrátor TrainerApp" else coachName.ifBlank { "Trenér" }
+    val subtitle = if (channel == "admin") "Systémová podpora a administrace" else "Chat s trenérem"
+    Column(modifier = Modifier.fillMaxSize().imePadding()) {
+        Row(modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+            TextButton(onClick = { channel = ""; lines = emptyList(); draft = ""; error = "" }) { AppText("‹", color = TrainerAppNavy, fontSize = 28.sp, fontWeight = FontWeight.Bold) }
+            if (channel == "admin") {
+                Box(modifier = Modifier.size(36.dp).clip(RoundedCornerShape(12.dp)).background(TrainerAppYellow), contentAlignment = Alignment.Center) {
+                    AppText("🛠️", fontSize = 18.sp)
+                }
+            } else {
+                ProfilePhoto(coachPhoto, title, 36.dp)
+            }
+            Spacer(Modifier.width(10.dp))
+            Column(Modifier.weight(1f)) {
+                AppText(title, color = TrainerAppNavy, fontSize = 16.sp, fontWeight = FontWeight.Bold)
+                AppText(subtitle, color = TrainerAppGray, fontSize = 12.sp)
+            }
+        }
+        if (loading) {
+            Box(Modifier.fillMaxWidth().padding(16.dp), contentAlignment = Alignment.Center) {
+                CircularProgressIndicator(color = TrainerAppNavy, modifier = Modifier.size(22.dp))
+            }
+        }
+        if (error.isNotBlank()) AppText(error, color = Color(0xFFB00020), fontSize = 13.sp, modifier = Modifier.padding(horizontal = 16.dp))
+        LazyColumn(state = listState, modifier = Modifier.weight(1f).fillMaxWidth().padding(horizontal = 16.dp)) {
+            items(lines, key = { "${channel}-${it.id}" }) { line ->
+                Row(modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp), horizontalArrangement = if (line.mine) Arrangement.End else Arrangement.Start) {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth(0.82f)
+                            .clip(RoundedCornerShape(14.dp))
+                            .background(if (line.mine) TrainerAppNavy else Color.White)
+                            .padding(12.dp)
+                    ) {
+                        AppText(line.body, color = if (line.mine) Color.White else TrainerAppNavy, fontSize = 15.sp)
+                        AppText(line.createdAt.drop(11).take(5), color = if (line.mine) Color.White.copy(alpha = 0.7f) else TrainerAppGray, fontSize = 11.sp)
+                    }
+                }
+            }
+        }
+        Row(modifier = Modifier.fillMaxWidth().padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
+            OutlinedTextField(
+                value = draft,
+                onValueChange = { draft = it },
+                modifier = Modifier.weight(1f),
+                placeholder = { AppText(if (channel == "admin") "Zpráva administrátorovi" else "Zpráva trenérovi") },
+                maxLines = 4
+            )
+            Spacer(Modifier.width(8.dp))
+            Button(
+                onClick = {
+                    val text = draft.trim()
+                    if (text.isBlank()) return@Button
+                    draft = ""
+                    val target = channel
+                    runInBackground {
+                        try {
+                            val result = athletePortal(context, token, "send", "POST", JSONObject().put("body", text).put("with", target))
+                            val json = result.jsonOrNull()
+                            runOnMain {
+                                if (json?.optBoolean("success", false) == true) reload += 1
+                                else error = json?.optString("error", "Zprávu se nepodařilo odeslat.").orEmpty()
+                            }
+                        } catch (e: Exception) {
+                            runOnMain { error = friendlyNetworkError(e) }
+                        }
+                    }
+                },
+                colors = ButtonDefaults.buttonColors(containerColor = TrainerAppYellow, contentColor = TrainerAppNavy)
+            ) { AppText("Odeslat", fontWeight = FontWeight.Bold) }
+        }
+    }
+}
+
+
+@Composable
+private fun AthletePaymentsPane(token: String, context: Context) {
+    var rows by remember { mutableStateOf<List<AthletePayRow>>(emptyList()) }
+    var loading by remember { mutableStateOf(true) }
+    var error by remember { mutableStateOf("") }
+    var openMonth by remember { mutableStateOf<String?>(null) }
+    LaunchedEffect(token) {
+        withContext(Dispatchers.IO) {
+            try {
+                val result = athletePortal(context, token, "payments")
+                val json = result.jsonOrNull()
+                if (result.code !in 200..299 || json == null || !json.optBoolean("success", false)) {
+                    runOnMain {
+                        error = apiErrorText(result, "Platby se nepodařilo načíst.")
+                        loading = false
+                    }
+                    return@withContext
+                }
+                val parsed = mutableListOf<AthletePayRow>()
+                val payments = json.optJSONArray("payments")
+                if (payments != null) {
+                    for (i in 0 until payments.length()) {
+                        val item = payments.getJSONObject(i)
+                        val missing = item.isNull("amount")
+                        val trainings = mutableListOf<AthletePayTraining>()
+                        val trainingArray = item.optJSONArray("trainings")
+                        if (trainingArray != null) {
+                            for (t in 0 until trainingArray.length()) {
+                                val training = trainingArray.getJSONObject(t)
+                                trainings.add(
+                                    AthletePayTraining(
+                                        title = training.optString("title", "Trénink"),
+                                        location = training.optString("location", ""),
+                                        startsAt = training.optString("starts_at", ""),
+                                        endsAt = training.optString("ends_at", ""),
+                                        paired = training.optBoolean("is_paired", false),
+                                        makeup = training.optBoolean("is_makeup", false),
+                                        amount = if (training.isNull("amount")) "—" else athleteMoney(training.optDouble("amount", 0.0), false),
+                                        note = training.optString("note", "")
+                                    )
+                                )
+                            }
+                        }
+                        parsed.add(
+                            AthletePayRow(
+                                month = item.optString("month", ""),
+                                sessions = item.optInt("sessions", 0),
+                                amount = athleteMoney(item.optDouble("amount", 0.0), missing),
+                                status = item.optString("status", ""),
+                                paidAt = item.optString("paid_at", ""),
+                                trainings = trainings
+                            )
+                        )
+                    }
+                }
+                runOnMain {
+                    rows = parsed
+                    error = ""
+                    loading = false
+                }
+            } catch (e: Exception) {
+                runOnMain {
+                    error = friendlyNetworkError(e)
+                    loading = false
+                }
+            }
+        }
+    }
+    Column(modifier = Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp)) {
+        AppText("Měsíční platby", color = TrainerAppNavy, fontSize = 20.sp, fontWeight = FontWeight.Bold)
+        Spacer(Modifier.height(12.dp))
+        if (loading) CircularProgressIndicator(color = TrainerAppNavy, modifier = Modifier.size(22.dp))
+        if (error.isNotBlank()) AppText(error, color = Color(0xFFB00020), fontSize = 14.sp)
+        if (!loading && rows.isEmpty() && error.isBlank()) AppText("Zatím tu nejsou žádné platby.", color = TrainerAppGray, fontSize = 14.sp)
+        rows.forEach { row ->
+            val opened = openMonth == row.month
+            Card(
+                modifier = Modifier.fillMaxWidth().padding(bottom = 10.dp).clickable { openMonth = if (opened) null else row.month },
+                colors = CardDefaults.cardColors(containerColor = MetalCard),
+                shape = RoundedCornerShape(14.dp)
+            ) {
+                Column(Modifier.padding(14.dp)) {
+                    Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                        Column(Modifier.weight(1f)) {
+                            AppText(athleteMonthLabel(row.month), color = TrainerAppNavy, fontSize = 16.sp, fontWeight = FontWeight.Bold)
+                        }
+                        AppText(row.amount, color = TrainerAppNavy, fontSize = 16.sp, fontWeight = FontWeight.Bold)
+                        Spacer(Modifier.width(8.dp))
+                        AppText(if (opened) "▲" else "▼", color = TrainerAppNavy, fontSize = 14.sp, fontWeight = FontWeight.Bold)
+                    }
+                    AppText("${row.sessions} tréninků", color = TrainerAppGray, fontSize = 13.sp)
+                    val paymentStatus = athletePaymentStatus(row.status)
+                    AppText(paymentStatus.first, color = paymentStatus.second, fontSize = 13.sp, fontWeight = FontWeight.Bold)
+                    if (row.status == "paid" && row.paidAt.isNotBlank()) AppText(formatPaidAt(row.paidAt), color = TrainerAppGray, fontSize = 12.sp)
+                    if (opened) {
+                        Spacer(Modifier.height(10.dp))
+                        AppText("Tréninky v platbě", color = TrainerAppNavy, fontSize = 14.sp, fontWeight = FontWeight.Bold)
+                        Spacer(Modifier.height(6.dp))
+                        if (row.trainings.isEmpty()) {
+                            AppText("V tomto období nejsou uvedené schválené tréninky.", color = TrainerAppGray, fontSize = 13.sp)
+                        } else {
+                            row.trainings.forEach { training ->
+                                Column(modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp).clip(RoundedCornerShape(10.dp)).background(Color.White).padding(10.dp)) {
+                                    Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                                        AppText(athleteRange(training.startsAt, training.endsAt), color = TrainerAppNavy, fontSize = 13.sp, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
+                                        AppText(training.amount, color = TrainerAppNavy, fontSize = 13.sp, fontWeight = FontWeight.Bold)
+                                    }
+                                    if (training.title.isNotBlank() && training.title != "Trénink") {
+                                        AppText(training.title, color = TrainerAppNavy, fontSize = 13.sp)
+                                    }
+                                    AppText(training.location.ifBlank { "—" }, color = TrainerAppGray, fontSize = 12.sp)
+                                    val kind = buildString {
+                                        append(if (training.paired) "Párový" else "Individuální")
+                                        append(if (training.makeup) " · náhradní" else " · běžný")
+                                    }
+                                    AppText(kind, color = TrainerAppGray, fontSize = 12.sp)
+                                    if (training.note.isNotBlank()) AppText(training.note, color = Color(0xFFB45309), fontSize = 12.sp)
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun AthleteWeightPane(token: String, context: Context, onSaved: () -> Unit) {
+    var weight by remember { mutableStateOf("") }
+    var date by remember { mutableStateOf(SimpleDateFormat("yyyy-MM-dd", Locale.US).format(Calendar.getInstance().time)) }
+    var showDatePicker by remember { mutableStateOf(false) }
+    var range by remember { mutableStateOf("month") }
+    var logs by remember { mutableStateOf<List<AthleteWeightRow>>(emptyList()) }
+    var loading by remember { mutableStateOf(true) }
+    var saving by remember { mutableStateOf(false) }
+    var error by remember { mutableStateOf("") }
+    var reload by remember { mutableIntStateOf(0) }
+
+    LaunchedEffect(reload, token) {
+        withContext(Dispatchers.IO) {
+            try {
+                val result = athletePortal(context, token, "weight")
+                val json = result.jsonOrNull()
+                if (result.code !in 200..299 || json == null || !json.optBoolean("success", false)) {
+                    runOnMain {
+                        error = apiErrorText(result, "Váhu se nepodařilo načíst.")
+                        loading = false
+                    }
+                    return@withContext
+                }
+                val parsed = mutableListOf<AthleteWeightRow>()
+                val items = json.optJSONArray("logs")
+                if (items != null) {
+                    for (i in 0 until items.length()) {
+                        val item = items.getJSONObject(i)
+                        parsed.add(AthleteWeightRow(item.optString("measured_at", "").take(10), item.optDouble("weight_kg", 0.0).toFloat()))
+                    }
+                }
+                runOnMain {
+                    logs = parsed
+                    error = ""
+                    loading = false
+                }
+            } catch (e: Exception) {
+                runOnMain {
+                    error = friendlyNetworkError(e)
+                    loading = false
+                }
+            }
+        }
+    }
+
+    Column(modifier = Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp)) {
+        AppText("Zadat váhu", color = TrainerAppNavy, fontSize = 20.sp, fontWeight = FontWeight.Bold)
+        Spacer(Modifier.height(12.dp))
+        OutlinedTextField(
+            value = weight,
+            onValueChange = { weight = it },
+            modifier = Modifier.fillMaxWidth(),
+            label = { AppText("Hmotnost v kg") },
+            singleLine = true,
+            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal)
+        )
+        Spacer(Modifier.height(8.dp))
+        Card(
+            modifier = Modifier.fillMaxWidth().clickable { showDatePicker = true },
+            colors = CardDefaults.cardColors(containerColor = TrainerAppLight)
+        ) {
+            Column(Modifier.padding(12.dp)) {
+                AppText("Datum", fontSize = 12.sp, color = TrainerAppGray)
+                AppText(formatTrainingDate(date), fontWeight = FontWeight.Bold, color = TrainerAppNavy)
+            }
+        }
+        if (showDatePicker) {
+            val pickerState = rememberDatePickerState(initialSelectedDateMillis = dateStringToUtcMillis(date))
+            DatePickerDialog(
+                onDismissRequest = { showDatePicker = false },
+                confirmButton = {
+                    TextButton(onClick = {
+                        pickerState.selectedDateMillis?.let { date = utcMillisToDateString(it) }
+                        showDatePicker = false
+                    }) { AppText("Vybrat", fontWeight = FontWeight.Bold) }
+                },
+                dismissButton = {
+                    TextButton(onClick = { showDatePicker = false }) { AppText("Zrušit") }
+                }
+            ) { DatePicker(state = pickerState) }
+        }
+        Spacer(Modifier.height(12.dp))
+        Button(
+            onClick = {
+                saving = true
+                error = ""
+                runInBackground {
+                    try {
+                        val body = JSONObject().put("weight_kg", weight.trim()).put("measured_at", date.trim())
+                        val result = athletePortal(context, token, "save_weight", "POST", body)
+                        val json = result.jsonOrNull()
+                        runOnMain {
+                            saving = false
+                            if (json?.optBoolean("success", false) == true) {
+                                weight = ""
+                                reload += 1
+                                onSaved()
+                            } else {
+                                error = json?.optString("error", apiErrorText(result, "Váhu se nepodařilo uložit.")).orEmpty()
+                            }
+                        }
+                    } catch (e: Exception) {
+                        runOnMain {
+                            saving = false
+                            error = friendlyNetworkError(e)
+                        }
+                    }
+                }
+            },
+            enabled = !saving,
+            colors = ButtonDefaults.buttonColors(containerColor = TrainerAppYellow, contentColor = TrainerAppNavy)
+        ) { AppText(if (saving) "Ukládám…" else "Uložit váhu", fontWeight = FontWeight.Bold) }
+        if (error.isNotBlank()) {
+            Spacer(Modifier.height(8.dp))
+            AppText(error, color = Color(0xFFB00020), fontSize = 14.sp)
+        }
+        Spacer(Modifier.height(18.dp))
+        if (loading) {
+            CircularProgressIndicator(color = TrainerAppNavy, modifier = Modifier.size(22.dp))
+        } else {
+            AthleteWeightChart(logs.sortedBy { it.measuredAt }, range) { range = it }
+        }
+    }
+}
+
+private fun formatPaidAt(raw: String): String {
+    val date = raw.take(10)
+    val time = raw.drop(11).take(5)
+    val label = formatTrainingDate(date)
+    return if (time.isBlank()) label else "$label $time"
+}
+
+private fun formatWeightKg(value: Float): String {
+    val rounded = kotlin.math.round(value * 10f) / 10f
+    return if (rounded % 1f == 0f) "${rounded.toInt()}" else String.format(Locale.forLanguageTag("cs-CZ"), "%.1f", rounded)
+}
+
+private fun filterWeightRows(rows: List<AthleteWeightRow>, range: String): List<AthleteWeightRow> {
+    if (rows.size < 2 || range == "all") return rows
+    val last = rows.last().measuredAt
+    val parts = last.split("-")
+    if (parts.size != 3) return rows
+    val end = Calendar.getInstance()
+    end.set(parts[0].toIntOrNull() ?: return rows, (parts[1].toIntOrNull() ?: return rows) - 1, parts[2].toIntOrNull() ?: return rows, 0, 0, 0)
+    val start = end.clone() as Calendar
+    when (range) {
+        "week" -> start.add(Calendar.DAY_OF_YEAR, -7)
+        "quarter" -> start.add(Calendar.MONTH, -4)
+        "year" -> start.add(Calendar.MONTH, -12)
+        else -> start.add(Calendar.DAY_OF_YEAR, -30)
+    }
+    return rows.filter { row ->
+        val day = row.measuredAt.split("-")
+        if (day.size != 3) return@filter false
+        val point = Calendar.getInstance()
+        point.set(day[0].toIntOrNull() ?: return@filter false, (day[1].toIntOrNull() ?: return@filter false) - 1, day[2].toIntOrNull() ?: return@filter false, 0, 0, 0)
+        !point.before(start)
+    }
+}
+
+private fun weightTrend(rows: List<AthleteWeightRow>): Pair<String, String> {
+    if (rows.size < 2) return "Nedostatek dat" to ""
+    val diff = rows.last().weightKg - rows.first().weightKg
+    val label = when {
+        kotlin.math.abs(diff) <= 1.5f -> "Stabilní váha"
+        diff <= -1.51f -> "Hubnutí"
+        else -> "Přibírání na váze"
+    }
+    val sign = if (diff > 0f) "+" else ""
+    return label to "$sign${formatWeightKg(diff)} kg"
+}
+
+@Composable
+private fun AthleteWeightChart(logs: List<AthleteWeightRow>, range: String, onRange: (String) -> Unit) {
+    val ranges = listOf("week" to "Týden", "month" to "1 měsíc", "quarter" to "Čtvrtletí", "year" to "Rok", "all" to "Vše")
+    val visible = filterWeightRows(logs, range)
+    val trend = weightTrend(visible)
+    var menu by remember { mutableStateOf(false) }
+    Card(modifier = Modifier.fillMaxWidth(), colors = CardDefaults.cardColors(containerColor = MetalCard), shape = RoundedCornerShape(16.dp)) {
+        Column(Modifier.padding(14.dp)) {
+            AppText("Vývoj tělesné hmotnosti", color = TrainerAppNavy, fontSize = 16.sp, fontWeight = FontWeight.Bold)
+            Spacer(Modifier.height(10.dp))
+            if (logs.isEmpty()) {
+                AppText("Zatím nemáte zadané žádné váhové záznamy.", color = TrainerAppGray, fontSize = 14.sp)
+            } else {
+                Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                    Box {
+                        Card(modifier = Modifier.clickable { menu = true }, colors = CardDefaults.cardColors(containerColor = Color.White)) {
+                            AppText("Období: ${ranges.firstOrNull { it.first == range }?.second ?: "1 měsíc"}", modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp), color = TrainerAppNavy, fontSize = 13.sp, fontWeight = FontWeight.Bold)
+                        }
+                        DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
+                            ranges.forEach { option ->
+                                DropdownMenuItem(text = { AppText(option.second) }, onClick = { onRange(option.first); menu = false })
+                            }
+                        }
+                    }
+                    Spacer(Modifier.weight(1f))
+                    Column(horizontalAlignment = Alignment.End) {
+                        AppText(trend.first, color = TrainerAppNavy, fontSize = 13.sp, fontWeight = FontWeight.Bold)
+                        if (trend.second.isNotBlank()) AppText(trend.second, color = TrainerAppGray, fontSize = 12.sp)
+                    }
+                }
+                Spacer(Modifier.height(12.dp))
+                WeightLineChart(visible)
+            }
+        }
+    }
+}
+
+@Composable
+private fun WeightLineChart(points: List<AthleteWeightRow>) {
+    if (points.isEmpty()) {
+        AppText("V tomto období není žádný záznam.", color = TrainerAppGray, fontSize = 13.sp)
+        return
+    }
+    val minW = points.minOf { it.weightKg }
+    val maxW = points.maxOf { it.weightKg }
+    val span = (maxW - minW).let { if (it < 1f) 1f else it }
+    val pad = span * 0.18f
+    val yMin = minW - pad
+    val yMax = maxW + pad
+    val line = Color(0xFF10B981)
+    Row(modifier = Modifier.fillMaxWidth()) {
+        Column(modifier = Modifier.height(180.dp).padding(end = 6.dp), verticalArrangement = Arrangement.SpaceBetween) {
+            AppText(formatWeightKg(maxW), color = TrainerAppGray, fontSize = 11.sp)
+            AppText(formatWeightKg(minW), color = TrainerAppGray, fontSize = 11.sp)
+        }
+        Column(Modifier.weight(1f)) {
+            Canvas(modifier = Modifier.fillMaxWidth().height(180.dp)) {
+                val top = 8.dp.toPx()
+                val bottom = 8.dp.toPx()
+                val plotH = size.height - top - bottom
+                val plotW = size.width
+                fun xAt(index: Int): Float = if (points.size == 1) plotW / 2f else plotW * index / (points.size - 1)
+                fun yAt(value: Float): Float = top + plotH * (1f - (value - yMin) / (yMax - yMin))
+                val linePath = Path()
+                val fillPath = Path()
+                points.forEachIndexed { index, point ->
+                    val x = xAt(index)
+                    val y = yAt(point.weightKg)
+                    if (index == 0) {
+                        linePath.moveTo(x, y)
+                        fillPath.moveTo(x, y)
+                    } else {
+                        linePath.lineTo(x, y)
+                        fillPath.lineTo(x, y)
+                    }
+                }
+                fillPath.lineTo(xAt(points.lastIndex), top + plotH)
+                fillPath.lineTo(xAt(0), top + plotH)
+                fillPath.close()
+                drawPath(fillPath, line.copy(alpha = 0.18f))
+                drawPath(linePath, line, style = Stroke(width = 3.dp.toPx(), cap = StrokeCap.Round, join = StrokeJoin.Round))
+                points.forEachIndexed { index, point ->
+                    drawCircle(line, radius = 3.5.dp.toPx(), center = androidx.compose.ui.geometry.Offset(xAt(index), yAt(point.weightKg)))
+                }
+            }
+            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                AppText(formatTrainingDate(points.first().measuredAt), color = TrainerAppGray, fontSize = 11.sp)
+                if (points.size > 1) AppText(formatTrainingDate(points.last().measuredAt), color = TrainerAppGray, fontSize = 11.sp)
+            }
+        }
+    }
+}
+
+@Composable
+private fun AthleteBottomBar(current: String, unread: Int, onNavigate: (String) -> Unit) {
+    Row(modifier = Modifier.fillMaxWidth().background(Color.White).padding(horizontal = 5.dp, vertical = 7.dp), horizontalArrangement = Arrangement.SpaceEvenly) {
+        NavigationItem("⌂", "Domů", current == "dashboard") { onNavigate("dashboard") }
+        NavigationItem("📅", "Kalendář", current == "calendar") { onNavigate("calendar") }
+        NavigationItem("💬", "Chat", current == "chat", badgeCount = unread) { onNavigate("chat") }
+        NavigationItem("💳", "Platby", current == "payments") { onNavigate("payments") }
+    }
+}
+
 
 @Composable
 private fun BottomNavigationBar(current: String, unreadChatCount: Int = 0, pendingCalendarCount: Int = 0, onNavigate: (String) -> Unit) {
@@ -3906,8 +5605,12 @@ private fun ChatListScreen(
 private fun ConversationCard(conversation: ChatConversation, onClick: () -> Unit) {
     Card(modifier = Modifier.fillMaxWidth().clickable { onClick() }, colors = CardDefaults.cardColors(containerColor = MetalCard), shape = RoundedCornerShape(16.dp)) {
         Row(modifier = Modifier.padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
-            Box(modifier = Modifier.size(46.dp).clip(RoundedCornerShape(14.dp)).background(if (conversation.isAdmin) TrainerAppYellow else TrainerAppNavy), contentAlignment = Alignment.Center) {
-                AppText(conversation.icon, fontSize = 22.sp)
+            if (conversation.photoUrl.isNotBlank()) {
+                ProfilePhoto(conversation.photoUrl, conversation.name, 46.dp)
+            } else {
+                Box(modifier = Modifier.size(46.dp).clip(RoundedCornerShape(14.dp)).background(if (conversation.isAdmin) TrainerAppYellow else TrainerAppNavy), contentAlignment = Alignment.Center) {
+                    AppText(conversation.icon, fontSize = 22.sp)
+                }
             }
             Spacer(Modifier.width(14.dp))
             Column(Modifier.weight(1f)) {
@@ -4009,8 +5712,12 @@ private fun ChatDetailScreen(
             Row(modifier = Modifier.fillMaxWidth().background(MetalHeaderBrush).padding(horizontal = 12.dp, vertical = 10.dp), verticalAlignment = Alignment.CenterVertically) {
                 ChatBackButton(onClick = onBack)
                 Spacer(Modifier.width(6.dp))
-                Box(modifier = Modifier.size(40.dp).clip(RoundedCornerShape(12.dp)).background(if (conversation.isAdmin) TrainerAppYellow else Color.White.copy(alpha = 0.2f)), contentAlignment = Alignment.Center) {
-                    AppText(conversation.icon, fontSize = 20.sp)
+                if (conversation.photoUrl.isNotBlank()) {
+                    ProfilePhoto(conversation.photoUrl, conversation.name, 40.dp)
+                } else {
+                    Box(modifier = Modifier.size(40.dp).clip(RoundedCornerShape(12.dp)).background(if (conversation.isAdmin) TrainerAppYellow else Color.White.copy(alpha = 0.2f)), contentAlignment = Alignment.Center) {
+                        AppText(conversation.icon, fontSize = 20.sp)
+                    }
                 }
                 Spacer(Modifier.width(12.dp))
                 Column(Modifier.weight(1f)) {
