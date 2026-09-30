@@ -2,22 +2,35 @@ package cz.trainerapp.mobile
 
 import android.Manifest
 import android.annotation.SuppressLint
+import android.app.AlarmManager
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
+import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import android.content.SharedPreferences
 import android.content.pm.PackageManager
+import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.os.SystemClock
 import androidx.activity.ComponentActivity
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.compose.setContent
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.tween
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -26,11 +39,15 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -41,16 +58,21 @@ import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.DatePicker
+import androidx.compose.material3.DatePickerDialog
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.LocalMinimumInteractiveComponentSize
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.material3.rememberDatePickerState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
@@ -60,23 +82,32 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.StrokeJoin
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.TextUnit
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
 import androidx.core.content.ContextCompat
+import androidx.core.view.WindowCompat
 import kotlinx.coroutines.delay
 import org.json.JSONObject
 import java.io.BufferedReader
-import java.io.InputStream
 import java.io.InputStreamReader
 import java.io.OutputStreamWriter
 import java.net.HttpURLConnection
@@ -90,30 +121,38 @@ import java.util.Calendar
 import java.util.Locale
 import java.util.concurrent.Executors
 
-private val TrainerAppNavy = Color(0xFF0B1B45)
-private val TrainerAppYellow = Color(0xFFFFC107)
-private val TrainerAppLight = Color(0xFFF5F7FA)
-private val TrainerAppGray = Color(0xFF718096)
+private val TrainerAppNavy = Color(0xFF2A3140)
+private val TrainerAppYellow = Color(0xFFD4AF37)
+private val TrainerAppLight = Color(0xFFE6E8ED)
+private val TrainerAppGray = Color(0xFF6E7580)
+private val MetalCard = Color(0xFFF6F4EF)
+private val MetalHeaderBrush = Brush.linearGradient(
+    colors = listOf(Color(0xFF6A7382), Color(0xFF1C2230), Color(0xFF3D4656))
+)
+private val MetalGoldBrush = Brush.linearGradient(
+    colors = listOf(Color(0xFFF6E7B2), Color(0xFFD4AF37), Color(0xFF8C6E1F), Color(0xFFE7D48A))
+)
 
 private const val PREFS_NAME = "trainerapp_session"
 private const val PREF_TOKEN = "token"
 private const val PREF_TYPE = "account_type"
 private const val PREF_NAME = "trainer_name"
 private const val PREF_ID = "trainer_id"
-private const val PREF_BASE_URL = "base_url"
+private const val PREF_LAST_PENDING = "last_pending"
+private const val PREF_LAST_EVENTS = "last_events"
+private const val PREF_LAST_UNREAD = "last_unread"
+private const val PREF_EXACT_ALARM_ASKED = "exact_alarm_asked"
 
-private const val DEFAULT_BASE_URL = "http://10.0.2.2/TrainerApp_v.3/api/mobile"
-private const val ONLINE_BASE_URL = "https://www.reservio.online/api/mobile"
+private const val API_BASE_URL = "https://www.reservio.online/api/mobile"
+private const val WEB_LOGIN_URL = "https://www.reservio.online/login.php"
 
-private fun getApiBaseUrl(context: Context): String {
-    val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-    return prefs.getString(PREF_BASE_URL, DEFAULT_BASE_URL) ?: DEFAULT_BASE_URL
-}
+private fun resolvedApiBase(@Suppress("UNUSED_PARAMETER") context: Context): String = API_BASE_URL
 
-private fun setApiBaseUrl(context: Context, url: String) {
-    val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-    prefs.edit().putString(PREF_BASE_URL, url.trimEnd('/')).apply()
-}
+data class RecentTraining(
+    val id: String,
+    val date: String,
+    val setName: String
+)
 
 data class AthleteItem(
     val id: String,
@@ -121,7 +160,8 @@ data class AthleteItem(
     val detail: String = "",
     val email: String = "",
     val phone: String = "",
-    val photoUrl: String = ""
+    val photoUrl: String = "",
+    val recentTrainings: List<RecentTraining> = emptyList()
 )
 
 data class AthleteFullDetail(
@@ -152,7 +192,24 @@ data class TrainingItem(
     val approvalStatus: String = "approved",
     val isLocked: Boolean = false,
     val startHour: Int = 9,
-    val endHour: Int = 10
+    val endHour: Int = 10,
+    val athleteId: Int = 0,
+    val title: String = "",
+    val location: String = "",
+    val startsAt: String = "",
+    val endsAt: String = "",
+    val colorKey: String = "green",
+    val secondAthleteId: Int = 0,
+    val seriesId: String = "",
+    val awaitingReschedule: Boolean = false
+)
+
+data class OpenSession(
+    val id: Int,
+    val athleteId: Int,
+    val athleteName: String,
+    val setName: String,
+    val startedAt: String
 )
 
 data class WorkoutSetItem(
@@ -182,7 +239,9 @@ data class SessionExerciseItem(
     val exerciseName: String,
     val sportType: String = "standard",
     val isTimed: Boolean = false,
-    val series: List<SessionSeriesItem> = emptyList()
+    val series: List<SessionSeriesItem> = emptyList(),
+    val previousSeries: List<SessionSeriesItem> = emptyList(),
+    val previousLabel: String = ""
 )
 
 data class SessionSeriesItem(
@@ -199,7 +258,8 @@ data class ChatMessage(
     val isMe: Boolean,
     val isRead: Boolean = false,
     val text: String,
-    val time: String
+    val time: String,
+    val wasUnread: Boolean = false
 )
 
 data class ChatConversation(
@@ -212,16 +272,51 @@ data class ChatConversation(
     val initialMessages: List<ChatMessage> = emptyList()
 )
 
+private object AppVisibility {
+    @Volatile
+    var isForeground: Boolean = false
+}
+
 class MainActivity : ComponentActivity() {
+    private val notificationPermissionLauncher = registerForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        AppVisibility.isForeground = true
+        WindowCompat.setDecorFitsSystemWindows(window, false)
         createNotificationChannel(this)
+        requestNotificationPermission()
+        maybeRequestExactAlarms(this)
 
         setContent {
             TrainerAppTheme {
-                TrainerAppRoot(this)
+                Box(Modifier.fillMaxSize().imePadding()) {
+                    TrainerAppRoot(this@MainActivity)
+                }
             }
         }
+    }
+
+    private fun requestNotificationPermission() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) return
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED) {
+            return
+        }
+        notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+    }
+
+    override fun onStart() {
+        super.onStart()
+        AppVisibility.isForeground = true
+        cancelAlertSync(this)
+    }
+
+    override fun onStop() {
+        AppVisibility.isForeground = false
+        scheduleAlertSync(this, 15_000L)
+        super.onStop()
     }
 }
 
@@ -244,6 +339,7 @@ private fun createNotificationChannel(context: Context) {
 
 @Suppress("MissingPermission")
 private fun sendSystemNotification(context: Context, title: String, message: String, notificationId: Int = 1001) {
+    if (AppVisibility.isForeground) return
     try {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
             ContextCompat.checkSelfPermission(
@@ -276,6 +372,164 @@ private fun sendSystemNotification(context: Context, title: String, message: Str
     } catch (_: Throwable) {}
 }
 
+private fun cancelSystemNotification(context: Context, notificationId: Int) {
+    try {
+        NotificationManagerCompat.from(context).cancel(notificationId)
+    } catch (_: Throwable) {}
+}
+
+private fun publishAlertChanges(context: Context, prefs: SharedPreferences, pending: Int, realEvents: Int, unread: Int) {
+    val lastPending = prefs.getInt(PREF_LAST_PENDING, -1)
+    val lastEvents = prefs.getInt(PREF_LAST_EVENTS, -1)
+    val lastUnread = prefs.getInt(PREF_LAST_UNREAD, -1)
+    val pendingGrew = lastPending >= 0 && pending > lastPending
+    val eventsGrew = lastEvents >= 0 && realEvents > lastEvents
+    if (pending == 0) cancelSystemNotification(context, 2003)
+    if (unread == 0) cancelSystemNotification(context, 2001)
+    if (pendingGrew) {
+        sendSystemNotification(context, "Žádost ke schválení", "V kalendáři je nová žádost ke schválení.", 2003)
+    } else if (eventsGrew) {
+        sendSystemNotification(context, "Kalendář TrainerApp", "V kalendáři je nová změna.", 2002)
+    }
+    if (lastUnread >= 0 && unread > lastUnread) {
+        sendSystemNotification(context, "TrainerApp Chat", "Máte novou zprávu v chatu.", 2001)
+    }
+    prefs.edit()
+        .putInt(PREF_LAST_PENDING, pending)
+        .putInt(PREF_LAST_EVENTS, realEvents)
+        .putInt(PREF_LAST_UNREAD, unread)
+        .apply()
+}
+
+private fun alertCountsFromCalendar(json: JSONObject): Pair<Int, Int> {
+    val array = json.optJSONArray("events") ?: json.optJSONArray("items")
+    var pending = 0
+    var real = 0
+    if (array != null) {
+        for (i in 0 until array.length()) {
+            val obj = array.optJSONObject(i) ?: continue
+            val locked = obj.optBoolean("is_locked", false)
+            if (locked) continue
+            real++
+            if (obj.optString("approval_status", "approved").equals("pending", true)) pending++
+        }
+    }
+    return pending to real
+}
+
+private fun unreadFromChat(json: JSONObject): Int {
+    val array = json.optJSONArray("conversations") ?: return 0
+    var unread = 0
+    for (i in 0 until array.length()) {
+        unread += array.optJSONObject(i)?.optInt("unread_count", 0) ?: 0
+    }
+    return unread
+}
+
+private const val ALERT_SYNC_ACTION = "cz.trainerapp.mobile.ALERT_SYNC"
+
+private fun alertSyncPendingIntent(context: Context): PendingIntent {
+    val intent = Intent(context, AlertSyncReceiver::class.java).setAction(ALERT_SYNC_ACTION)
+    return PendingIntent.getBroadcast(
+        context,
+        2401,
+        intent,
+        PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+    )
+}
+
+private fun canScheduleExactAlarms(context: Context): Boolean {
+    val alarmManager = context.getSystemService(Context.ALARM_SERVICE) as AlarmManager
+    return Build.VERSION.SDK_INT < Build.VERSION_CODES.S || alarmManager.canScheduleExactAlarms()
+}
+
+private fun maybeRequestExactAlarms(activity: ComponentActivity) {
+    if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S) return
+    if (canScheduleExactAlarms(activity)) return
+    val prefs = activity.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+    if (prefs.getString(PREF_TOKEN, "").isNullOrBlank()) return
+    if (prefs.getBoolean(PREF_EXACT_ALARM_ASKED, false)) return
+    prefs.edit().putBoolean(PREF_EXACT_ALARM_ASKED, true).apply()
+    val intent = Intent(android.provider.Settings.ACTION_REQUEST_SCHEDULE_EXACT_ALARM).apply {
+        data = Uri.parse("package:${activity.packageName}")
+    }
+    try {
+        activity.startActivity(intent)
+    } catch (_: Exception) {}
+}
+
+private fun scheduleAlertSync(context: Context, delayMs: Long) {
+    val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+    if (prefs.getString(PREF_TOKEN, "").isNullOrBlank()) return
+    val alarmManager = context.getSystemService(Context.ALARM_SERVICE) as AlarmManager
+    val triggerAt = SystemClock.elapsedRealtime() + delayMs
+    val pendingIntent = alertSyncPendingIntent(context)
+    if (canScheduleExactAlarms(context)) {
+        alarmManager.setExactAndAllowWhileIdle(AlarmManager.ELAPSED_REALTIME_WAKEUP, triggerAt, pendingIntent)
+    } else {
+        alarmManager.setAndAllowWhileIdle(AlarmManager.ELAPSED_REALTIME_WAKEUP, triggerAt, pendingIntent)
+    }
+}
+
+private fun cancelAlertSync(context: Context) {
+    val alarmManager = context.getSystemService(Context.ALARM_SERVICE) as AlarmManager
+    alarmManager.cancel(alertSyncPendingIntent(context))
+}
+
+private fun runAlertSync(context: Context) {
+    if (AppVisibility.isForeground) return
+    val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+    val token = prefs.getString(PREF_TOKEN, "") ?: ""
+    if (token.isBlank()) return
+    createNotificationChannel(context)
+    val calendar = httpRequest(context, "calendar.php?token=${tokenQuery(token)}", token = token)
+    val chat = httpRequest(context, "chat.php?action=conversations&token=${tokenQuery(token)}", token = token)
+    val calendarJson = calendar.jsonOrNull()
+    val chatJson = chat.jsonOrNull()
+    if (calendar.code !in 200..299 || calendarJson == null || chat.code !in 200..299 || chatJson == null) return
+    val (pending, realEvents) = alertCountsFromCalendar(calendarJson)
+    publishAlertChanges(context, prefs, pending, realEvents, unreadFromChat(chatJson))
+}
+
+class AlertSyncReceiver : BroadcastReceiver() {
+    override fun onReceive(context: Context, intent: Intent?) {
+        if (intent?.action != ALERT_SYNC_ACTION) return
+        val appContext = context.applicationContext
+        if (!AppVisibility.isForeground) {
+            scheduleAlertSync(appContext, 2 * 60 * 1000L)
+        }
+        val pendingResult = goAsync()
+        Thread {
+            try {
+                runAlertSync(appContext)
+            } catch (_: Exception) {
+            } finally {
+                pendingResult.finish()
+            }
+        }.start()
+    }
+}
+
+class AlertBootReceiver : BroadcastReceiver() {
+    override fun onReceive(context: Context, intent: Intent?) {
+        if (intent?.action != Intent.ACTION_BOOT_COMPLETED) return
+        scheduleAlertSync(context.applicationContext, 60_000L)
+    }
+}
+
+private fun jsonId(obj: JSONObject, key: String = "id"): String {
+    if (!obj.has(key) || obj.isNull(key)) return ""
+    val raw = obj.opt(key)
+    return when (raw) {
+        is Number -> raw.toInt().toString()
+        else -> raw?.toString().orEmpty()
+    }
+}
+
+private fun formatKg(value: Float): String {
+    return if (value % 1f == 0f) value.toInt().toString() else String.format(Locale.US, "%.1f", value)
+}
+
 private fun parseAthletesFromJson(json: JSONObject): List<AthleteItem> {
     val list = mutableListOf<AthleteItem>()
     val array = json.optJSONArray("athletes") ?: json.optJSONArray("sportovci") ?: json.optJSONArray("clients") ?: json.optJSONArray("data")
@@ -292,8 +546,22 @@ private fun parseAthletesFromJson(json: JSONObject): List<AthleteItem> {
             val note = item.optString("note", item.optString("detail", ""))
             val lastTraining = item.optString("last_training_at", "")
             val detailText = if (lastTraining.isNotBlank()) "Poslední trénink: $lastTraining" else note
+            val recent = mutableListOf<RecentTraining>()
+            val recentArray = item.optJSONArray("recent_trainings")
+            if (recentArray != null) {
+                for (r in 0 until recentArray.length()) {
+                    val row = recentArray.optJSONObject(r) ?: continue
+                    recent.add(
+                        RecentTraining(
+                            id = jsonId(row),
+                            date = row.optString("date", row.optString("started_at", "")),
+                            setName = row.optString("set_name", "Trénink")
+                        )
+                    )
+                }
+            }
 
-            list.add(AthleteItem(id, fullName, detailText, email, phone, photo))
+            list.add(AthleteItem(id, fullName, detailText, email, phone, photo, recent))
         }
     }
     return list
@@ -308,7 +576,6 @@ private fun TrainerAppRoot(context: Context) {
     var trainerId by remember { mutableStateOf(prefs.getString(PREF_ID, "") ?: "") }
     var accountType by remember { mutableStateOf(prefs.getString(PREF_TYPE, "trainer") ?: "trainer") }
     var lastLoginScreen by remember { mutableStateOf("trainer_login") }
-    var currentBaseUrl by remember { mutableStateOf(getApiBaseUrl(context)) }
 
     var athletesList by remember { mutableStateOf<List<AthleteItem>>(emptyList()) }
     var workoutSetsList by remember { mutableStateOf<List<WorkoutSetItem>>(emptyList()) }
@@ -316,19 +583,22 @@ private fun TrainerAppRoot(context: Context) {
     var trainingsList by remember { mutableStateOf<List<TrainingItem>>(emptyList()) }
     var conversationsList by remember { mutableStateOf<List<ChatConversation>>(emptyList()) }
     var activeSessionId by remember { mutableIntStateOf(0) }
+    var openSessions by remember { mutableStateOf<List<OpenSession>>(emptyList()) }
     var selectedChatConversationId by remember { mutableStateOf<String?>(null) }
     var isLoadingData by remember { mutableStateOf(false) }
-
-    var lastSeenUnreadCount by remember { mutableIntStateOf(0) }
-    var lastSeenCalendarCount by remember { mutableIntStateOf(0) }
+    var hasLoadedOnce by remember { mutableStateOf(false) }
+    var dataError by remember { mutableStateOf("") }
 
     val totalUnreadChatCount = remember(conversationsList) {
         conversationsList.sumOf { it.unreadCount }
     }
+    val pendingCalendarCount = remember(trainingsList) {
+        trainingsList.count { it.approvalStatus.equals("pending", true) && !it.isLocked }
+    }
 
     fun refreshApiData() {
         if (token.isBlank()) return
-        isLoadingData = true
+        if (!hasLoadedOnce) isLoadingData = true
 
         fetchUserDataFromApi(
             context = context,
@@ -347,21 +617,32 @@ private fun TrainerAppRoot(context: Context) {
             token = token,
             onSuccess = { athletes ->
                 athletesList = athletes
+                dataError = ""
 
                 fetchCalendarFromApi(
                     context = context,
                     token = token,
                     onSuccess = { calEvents ->
-                        if (lastSeenCalendarCount > 0 && calEvents.size > lastSeenCalendarCount) {
-                            sendSystemNotification(context, "Kalendář TrainerApp", "Máte novou událost nebo změnu v kalendáři.", 2002)
-                        }
-                        lastSeenCalendarCount = calEvents.size
+                        val pending = calEvents.count { it.approvalStatus.equals("pending", true) && !it.isLocked }
+                        val realEvents = calEvents.count { !it.isLocked }
+                        val unreadNow = prefs.getInt(PREF_LAST_UNREAD, conversationsList.sumOf { it.unreadCount })
+                        publishAlertChanges(context, prefs, pending, realEvents, unreadNow)
                         trainingsList = calEvents
+                        hasLoadedOnce = true
+                        isLoadingData = false
+                    },
+                    onError = { message ->
+                        dataError = message
+                        hasLoadedOnce = true
                         isLoadingData = false
                     }
                 )
             },
-            onError = { isLoadingData = false }
+            onError = { message ->
+                dataError = message
+                hasLoadedOnce = true
+                isLoadingData = false
+            }
         )
 
         fetchWorkoutSetsFromApi(
@@ -377,23 +658,22 @@ private fun TrainerAppRoot(context: Context) {
             onSuccess = { vList -> venuesList = vList }
         )
 
+        fetchOpenSessions(context, token) { sessions -> openSessions = sessions }
+
         fetchChatConversationsFromApi(
             context = context,
             token = token,
             onSuccess = { convs ->
-                if (convs.isNotEmpty()) {
-                    conversationsList = convs
-                    val newUnread = convs.sumOf { it.unreadCount }
-                    if (newUnread > lastSeenUnreadCount && lastSeenUnreadCount >= 0) {
-                        sendSystemNotification(context, "TrainerApp Chat", "Máte novou nepřečtenou zprávu v chatu.", 2001)
-                    }
-                    lastSeenUnreadCount = newUnread
-                }
+                conversationsList = convs
+                val newUnread = convs.sumOf { it.unreadCount }
+                val pendingNow = prefs.getInt(PREF_LAST_PENDING, trainingsList.count { it.approvalStatus.equals("pending", true) && !it.isLocked })
+                val eventsNow = prefs.getInt(PREF_LAST_EVENTS, trainingsList.count { !it.isLocked })
+                publishAlertChanges(context, prefs, pendingNow, eventsNow, newUnread)
             }
         )
     }
 
-    LaunchedEffect(token, currentBaseUrl) {
+    LaunchedEffect(token) {
         if (token.isNotBlank()) {
             refreshApiData()
             while (true) {
@@ -409,11 +689,6 @@ private fun TrainerAppRoot(context: Context) {
 
     when (screen) {
         "home" -> HomeScreen(
-            currentBaseUrl = currentBaseUrl,
-            onBaseUrlChange = { newUrl ->
-                currentBaseUrl = newUrl
-                setApiBaseUrl(context, newUrl)
-            },
             onTrainer = { screen = "trainer_login" },
             onAthlete = { screen = "athlete_login" }
         )
@@ -423,12 +698,7 @@ private fun TrainerAppRoot(context: Context) {
             LoginScreen(
                 context = context,
                 subtitle = "Přihlášení pro trenéry",
-                description = "Zadejte své trenérské přihlašovací údaje (server: $currentBaseUrl).",
-                currentBaseUrl = currentBaseUrl,
-                onBaseUrlChange = { newUrl ->
-                    currentBaseUrl = newUrl
-                    setApiBaseUrl(context, newUrl)
-                },
+                description = "Zadejte své trenérské přihlašovací údaje.",
                 onBack = { screen = "home" },
                 onForgotPassword = { screen = "forgot_password" },
                 onLoginSuccess = { name, id, newToken, jsonResp ->
@@ -457,12 +727,7 @@ private fun TrainerAppRoot(context: Context) {
             LoginScreen(
                 context = context,
                 subtitle = "Přihlášení pro sportovce",
-                description = "Zadejte své přihlašovací údaje sportovce (server: $currentBaseUrl).",
-                currentBaseUrl = currentBaseUrl,
-                onBaseUrlChange = { newUrl ->
-                    currentBaseUrl = newUrl
-                    setApiBaseUrl(context, newUrl)
-                },
+                description = "Zadejte své přihlašovací údaje sportovce.",
                 onBack = { screen = "home" },
                 onForgotPassword = { screen = "forgot_password" },
                 onLoginSuccess = { name, id, newToken, jsonResp ->
@@ -486,24 +751,26 @@ private fun TrainerAppRoot(context: Context) {
             )
         }
 
-        "forgot_password" -> ForgotPasswordScreen(onBack = { screen = lastLoginScreen })
+        "forgot_password" -> ForgotPasswordScreen(context = context, onBack = { screen = lastLoginScreen })
 
         "dashboard" -> TrainerDashboard(
             trainerName = trainerName,
             accountType = accountType,
             trainings = trainingsList,
             unreadChatCount = totalUnreadChatCount,
+            pendingCalendarCount = pendingCalendarCount,
             isLoading = isLoadingData,
-            currentBaseUrl = currentBaseUrl,
-            onBaseUrlChange = { newUrl ->
-                currentBaseUrl = newUrl
-                setApiBaseUrl(context, newUrl)
-                refreshApiData()
-            },
+            dataError = dataError,
             onRefresh = { refreshApiData() },
+            openSessions = openSessions,
+            onOpenSession = { sessionId ->
+                activeSessionId = sessionId
+                screen = "training"
+            },
             onNavigate = { screen = it },
             onLogout = {
                 if (token.isNotBlank()) logoutFromApi(context, token)
+                cancelAlertSync(context)
                 prefs.edit().clear().apply()
                 token = ""
                 trainerName = ""
@@ -513,6 +780,8 @@ private fun TrainerAppRoot(context: Context) {
                 workoutSetsList = emptyList()
                 trainingsList = emptyList()
                 conversationsList = emptyList()
+                openSessions = emptyList()
+                activeSessionId = 0
                 screen = "home"
             }
         )
@@ -522,6 +791,7 @@ private fun TrainerAppRoot(context: Context) {
             token = token,
             context = context,
             unreadChatCount = totalUnreadChatCount,
+            pendingCalendarCount = pendingCalendarCount,
             isLoading = isLoadingData,
             onRefresh = { refreshApiData() },
             onNavigate = { screen = it },
@@ -538,19 +808,28 @@ private fun TrainerAppRoot(context: Context) {
             token = token,
             context = context,
             unreadChatCount = totalUnreadChatCount,
+            pendingCalendarCount = pendingCalendarCount,
             isLoading = isLoadingData,
             onRefresh = { refreshApiData() },
             onNavigate = { screen = it }
         )
 
         "chat" -> ChatSectionScreen(
-            athletes = athletesList,
             initialConversations = conversationsList,
             selectedConversationId = selectedChatConversationId,
             unreadChatCount = totalUnreadChatCount,
+            pendingCalendarCount = pendingCalendarCount,
             token = token,
             context = context,
-            onNavigate = { screen = it }
+            onNavigate = { screen = it },
+            onConversationRead = {
+                cancelSystemNotification(context, 2001)
+                fetchChatConversationsFromApi(context, token, onSuccess = { convs ->
+                    conversationsList = convs
+                    prefs.edit().putInt(PREF_LAST_UNREAD, convs.sumOf { it.unreadCount }).apply()
+                    if (convs.sumOf { it.unreadCount } == 0) cancelSystemNotification(context, 2001)
+                })
+            }
         )
 
         "training" -> TrainingScreen(
@@ -560,7 +839,9 @@ private fun TrainerAppRoot(context: Context) {
             token = token,
             context = context,
             activeSessionId = activeSessionId,
+            openSessions = openSessions,
             unreadChatCount = totalUnreadChatCount,
+            pendingCalendarCount = pendingCalendarCount,
             onSessionStarted = { newSessionId ->
                 activeSessionId = newSessionId
                 refreshApiData()
@@ -578,10 +859,8 @@ private fun TrainerAppRoot(context: Context) {
 }
 
 @Composable
-private fun HomeScreen(currentBaseUrl: String, onBaseUrlChange: (String) -> Unit, onTrainer: () -> Unit, onAthlete: () -> Unit) {
-    var showServerDialog by remember { mutableStateOf(false) }
-
-    Surface(modifier = Modifier.fillMaxSize(), color = TrainerAppNavy) {
+private fun HomeScreen(onTrainer: () -> Unit, onAthlete: () -> Unit) {
+    Box(modifier = Modifier.fillMaxSize().background(MetalHeaderBrush)) {
         Column(
             modifier = Modifier
                 .fillMaxSize()
@@ -618,69 +897,9 @@ private fun HomeScreen(currentBaseUrl: String, onBaseUrlChange: (String) -> Unit
                 AppText("Přihlášení sportovce", fontSize = 16.sp, fontWeight = FontWeight.Bold)
             }
             Spacer(Modifier.height(20.dp))
-            TextButton(onClick = { showServerDialog = true }) {
-                AppText("⚙️ Server: ${if (currentBaseUrl.contains("reservio.online")) "Online (reservio.online)" else "Lokální WAMP"}", color = TrainerAppYellow, fontSize = 13.sp)
-            }
-            Spacer(Modifier.height(8.dp))
             AppText("Mobilní aplikace TrainerApp", color = Color.White.copy(alpha = 0.65f), fontSize = 13.sp)
         }
     }
-
-    if (showServerDialog) {
-        ServerConfigDialog(
-            currentBaseUrl = currentBaseUrl,
-            onDismiss = { showServerDialog = false },
-            onSelect = { url ->
-                onBaseUrlChange(url)
-                showServerDialog = false
-            }
-        )
-    }
-}
-
-@Composable
-private fun ServerConfigDialog(currentBaseUrl: String, onDismiss: () -> Unit, onSelect: (String) -> Unit) {
-    var customUrl by remember { mutableStateOf(currentBaseUrl) }
-
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = { AppText("Nastavení serveru (API Base URL)", color = TrainerAppNavy, fontWeight = FontWeight.Bold) },
-        text = {
-            Column {
-                AppText("Vyberte připojení k serveru:", fontSize = 13.sp, color = TrainerAppGray)
-                Spacer(Modifier.height(10.dp))
-                Button(
-                    onClick = { onSelect(DEFAULT_BASE_URL) },
-                    modifier = Modifier.fillMaxWidth(),
-                    colors = ButtonDefaults.buttonColors(containerColor = TrainerAppNavy)
-                ) {
-                    AppText("Lokální WAMP (Emulator: http://10.0.2.2/...)", color = Color.White, fontSize = 12.sp)
-                }
-                Spacer(Modifier.height(6.dp))
-                Button(
-                    onClick = { onSelect(ONLINE_BASE_URL) },
-                    modifier = Modifier.fillMaxWidth(),
-                    colors = ButtonDefaults.buttonColors(containerColor = TrainerAppYellow, contentColor = TrainerAppNavy)
-                ) {
-                    AppText("Online (https://www.reservio.online/...)", fontWeight = FontWeight.Bold, fontSize = 12.sp)
-                }
-                Spacer(Modifier.height(12.dp))
-                OutlinedTextField(
-                    value = customUrl,
-                    onValueChange = { customUrl = it },
-                    label = { AppText("Vlastní URL") },
-                    modifier = Modifier.fillMaxWidth(),
-                    singleLine = true
-                )
-            }
-        },
-        confirmButton = {
-            Button(onClick = { onSelect(customUrl) }, colors = ButtonDefaults.buttonColors(containerColor = TrainerAppYellow, contentColor = TrainerAppNavy)) {
-                AppText("Použít", fontWeight = FontWeight.Bold)
-            }
-        },
-        dismissButton = { TextButton(onClick = onDismiss) { AppText("Zrušit") } }
-    )
 }
 
 @Composable
@@ -688,8 +907,6 @@ private fun LoginScreen(
     context: Context,
     subtitle: String,
     description: String,
-    currentBaseUrl: String,
-    onBaseUrlChange: (String) -> Unit,
     onBack: () -> Unit,
     onForgotPassword: () -> Unit,
     onLoginSuccess: (String, String, String, JSONObject) -> Unit
@@ -699,7 +916,6 @@ private fun LoginScreen(
     var passwordVisible by remember { mutableStateOf(false) }
     var loading by remember { mutableStateOf(false) }
     var errorMessage by remember { mutableStateOf("") }
-    var showServerDialog by remember { mutableStateOf(false) }
 
     Surface(modifier = Modifier.fillMaxSize(), color = TrainerAppLight) {
         Column(
@@ -721,10 +937,6 @@ private fun LoginScreen(
             AppText(subtitle, color = TrainerAppNavy, fontSize = 26.sp, fontWeight = FontWeight.Bold, textAlign = TextAlign.Center)
             Spacer(Modifier.height(6.dp))
             AppText(description, color = TrainerAppGray, fontSize = 14.sp, textAlign = TextAlign.Center)
-            Spacer(Modifier.height(16.dp))
-            OutlinedButton(onClick = { showServerDialog = true }, modifier = Modifier.fillMaxWidth()) {
-                AppText("⚙️ Server: ${if (currentBaseUrl.contains("reservio.online")) "Online" else "Lokální WAMP"}", fontSize = 13.sp)
-            }
             Spacer(Modifier.height(18.dp))
             OutlinedTextField(
                 value = username,
@@ -792,50 +1004,25 @@ private fun LoginScreen(
             Spacer(Modifier.height(18.dp))
         }
     }
-
-    if (showServerDialog) {
-        ServerConfigDialog(
-            currentBaseUrl = currentBaseUrl,
-            onDismiss = { showServerDialog = false },
-            onSelect = { url ->
-                onBaseUrlChange(url)
-                showServerDialog = false
-            }
-        )
-    }
 }
 
 @Composable
-private fun ForgotPasswordScreen(onBack: () -> Unit) {
-    var email by remember { mutableStateOf("") }
-    var infoMessage by remember { mutableStateOf("") }
-    var isError by remember { mutableStateOf(false) }
-
-    Surface(modifier = Modifier.fillMaxSize(), color = TrainerAppNavy) {
+private fun ForgotPasswordScreen(context: Context, onBack: () -> Unit) {
+    Box(modifier = Modifier.fillMaxSize().background(MetalHeaderBrush)) {
         Column(modifier = Modifier.fillMaxSize().statusBarsPadding().navigationBarsPadding().padding(20.dp), verticalArrangement = Arrangement.Center) {
             AppText("Obnova hesla", color = Color.White, fontSize = 29.sp, fontWeight = FontWeight.Bold)
             Spacer(Modifier.height(8.dp))
-            AppText("Zadejte e-mail, na který vám zašleme instrukce.", color = Color.White.copy(alpha = 0.75f), fontSize = 14.sp)
+            AppText("Obnovu hesla dokončíte na webu reservio.online. Mobilní API pro odeslání e-mailu nemá.", color = Color.White.copy(alpha = 0.75f), fontSize = 14.sp)
             Spacer(Modifier.height(25.dp))
 
             Column(modifier = Modifier.fillMaxWidth().background(Color.White, RoundedCornerShape(20.dp)).padding(20.dp)) {
-                OutlinedTextField(value = email, onValueChange = { email = it; infoMessage = "" }, modifier = Modifier.fillMaxWidth(), label = { AppText("E-mail") }, singleLine = true)
-                if (infoMessage.isNotBlank()) {
-                    Spacer(Modifier.height(12.dp))
-                    Card(modifier = Modifier.fillMaxWidth(), colors = CardDefaults.cardColors(containerColor = if (isError) Color(0xFFFFE3E3) else Color(0xFFE6F4EA)), shape = RoundedCornerShape(10.dp)) {
-                        AppText(infoMessage, color = if (isError) Color(0xFFB00020) else Color(0xFF137333), modifier = Modifier.padding(12.dp), textAlign = TextAlign.Center, fontSize = 13.sp)
-                    }
-                }
-                Spacer(Modifier.height(18.dp))
                 Button(
                     onClick = {
-                        val clean = email.trim()
-                        if (clean.isEmpty() || !clean.contains("@")) { isError = true; infoMessage = "Zadejte platný e-mail." }
-                        else { isError = false; infoMessage = "Instrukce k obnově hesla byly odeslány na e-mail." }
+                        context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(WEB_LOGIN_URL)))
                     },
                     modifier = Modifier.fillMaxWidth(),
                     colors = ButtonDefaults.buttonColors(containerColor = TrainerAppYellow, contentColor = TrainerAppNavy)
-                ) { AppText("Odeslat instrukce", fontWeight = FontWeight.Bold) }
+                ) { AppText("Otevřít obnovu na webu", fontWeight = FontWeight.Bold) }
                 Spacer(Modifier.height(8.dp))
                 OutlinedButton(onClick = onBack, modifier = Modifier.fillMaxWidth()) { AppText("Zpět na přihlášení") }
             }
@@ -849,16 +1036,16 @@ private fun TrainerDashboard(
     accountType: String,
     trainings: List<TrainingItem>,
     unreadChatCount: Int,
+    pendingCalendarCount: Int,
+    openSessions: List<OpenSession>,
     isLoading: Boolean,
-    currentBaseUrl: String,
-    onBaseUrlChange: (String) -> Unit,
+    dataError: String,
     onRefresh: () -> Unit,
+    onOpenSession: (Int) -> Unit,
     onNavigate: (String) -> Unit,
     onLogout: () -> Unit
 ) {
-    val subtitleText = if (accountType == "athlete") "Sportovní dashboard" else "Trenérský dashboard"
     val todayDateStr = remember { SimpleDateFormat("yyyy-MM-dd", Locale.getDefault()).format(Calendar.getInstance().time) }
-    var showServerDialog by remember { mutableStateOf(false) }
 
     val todayEvents = remember(trainings, todayDateStr) {
         trainings.filter { (it.date == todayDateStr || it.date.isBlank()) && !it.isLocked }
@@ -866,42 +1053,74 @@ private fun TrainerDashboard(
 
     Surface(modifier = Modifier.fillMaxSize(), color = TrainerAppLight) {
         Column(modifier = Modifier.fillMaxSize().statusBarsPadding().navigationBarsPadding()) {
-            Column(modifier = Modifier.fillMaxWidth().background(TrainerAppNavy).padding(20.dp)) {
-                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-                    Column(Modifier.weight(1f)) {
-                        AppText("Dobrý den${if (trainerName.isNotBlank()) ", $trainerName" else ""} 👋", color = Color.White, fontSize = 24.sp, fontWeight = FontWeight.Bold)
-                        Spacer(Modifier.height(5.dp))
-                        AppText(subtitleText, color = Color.White.copy(alpha = 0.72f), fontSize = 14.sp)
-                    }
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        IconButton(onClick = { showServerDialog = true }) { AppText("⚙️", fontSize = 18.sp) }
-                        IconButton(onClick = onRefresh) { AppText("🔄", fontSize = 20.sp) }
-                    }
+            Row(
+                modifier = Modifier.fillMaxWidth().background(MetalHeaderBrush).padding(horizontal = 16.dp, vertical = 12.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column(Modifier.weight(1f)) {
+                    AppText(trainerName.ifBlank { "Uživatel" }, color = Color.White, fontSize = 20.sp, fontWeight = FontWeight.Bold)
+                    AppText(if (accountType == "athlete") "sportovec" else "trenér", color = Color.White.copy(alpha = 0.72f), fontSize = 14.sp)
                 }
+                TextButton(onClick = onLogout) { AppText("Odhlásit", color = Color.White, fontWeight = FontWeight.Bold) }
             }
 
             Column(modifier = Modifier.weight(1f).fillMaxWidth().verticalScroll(rememberScrollState()).padding(16.dp)) {
-                AppText("Dnešní události v kalendáři", color = TrainerAppNavy, fontSize = 20.sp, fontWeight = FontWeight.Bold)
-                Spacer(Modifier.height(12.dp))
+                val todayCountLabel = when (todayEvents.size) {
+                    0 -> "žádná událost"
+                    1 -> "1 událost"
+                    2, 3, 4 -> "${todayEvents.size} události"
+                    else -> "${todayEvents.size} událostí"
+                }
+                var todayExpanded by remember { mutableStateOf(false) }
 
-                if (isLoading) {
-                    Box(modifier = Modifier.fillMaxWidth().height(100.dp), contentAlignment = Alignment.Center) {
-                        CircularProgressIndicator(color = TrainerAppNavy)
-                    }
-                } else if (todayEvents.isEmpty()) {
-                    Card(modifier = Modifier.fillMaxWidth(), colors = CardDefaults.cardColors(containerColor = Color.White), shape = RoundedCornerShape(16.dp)) {
-                        Column(modifier = Modifier.padding(18.dp), horizontalAlignment = Alignment.CenterHorizontally) {
-                            AppText("📅", fontSize = 32.sp)
+                Card(
+                    modifier = Modifier.fillMaxWidth().clickable(enabled = todayEvents.isNotEmpty()) {
+                        todayExpanded = !todayExpanded
+                    },
+                    colors = CardDefaults.cardColors(containerColor = MetalCard),
+                    shape = RoundedCornerShape(16.dp)
+                ) {
+                    Column(Modifier.padding(16.dp)) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            AppText("📅", fontSize = 22.sp)
+                            Spacer(Modifier.width(10.dp))
+                            Column(Modifier.weight(1f)) {
+                                AppText("Dnešní události", color = TrainerAppNavy, fontSize = 18.sp, fontWeight = FontWeight.Bold)
+                                AppText(todayCountLabel, color = TrainerAppGray, fontSize = 13.sp)
+                            }
+                            if (todayEvents.isNotEmpty()) {
+                                AppText(if (todayExpanded) "▲" else "▼", color = TrainerAppNavy, fontSize = 16.sp, fontWeight = FontWeight.Bold)
+                            }
+                        }
+                        if (isLoading) {
+                            Spacer(Modifier.height(12.dp))
+                            CircularProgressIndicator(color = TrainerAppNavy, modifier = Modifier.size(22.dp))
+                        } else if (todayEvents.isEmpty()) {
                             Spacer(Modifier.height(8.dp))
-                            AppText("Na dnešek nemáte naplánované žádné události v kalendáři.", color = TrainerAppNavy, fontSize = 15.sp, fontWeight = FontWeight.Bold, textAlign = TextAlign.Center)
-                            Spacer(Modifier.height(4.dp))
-                            AppText("Server: $currentBaseUrl", color = TrainerAppGray, fontSize = 11.sp, textAlign = TextAlign.Center)
+                            AppText("Na dnešek nemáte naplánované žádné události.", color = TrainerAppGray, fontSize = 13.sp)
+                        } else if (todayExpanded) {
+                            Spacer(Modifier.height(12.dp))
+                            todayEvents.forEach { training ->
+                                TodayTrainingCard(training.time, training.athleteName, training.detail) { onNavigate("calendar") }
+                                Spacer(Modifier.height(10.dp))
+                            }
                         }
                     }
-                } else {
-                    todayEvents.forEach { training ->
-                        TodayTrainingCard(training.time, training.athleteName, training.detail) { onNavigate("calendar") }
-                        Spacer(Modifier.height(10.dp))
+                }
+
+                if (dataError.isNotBlank()) {
+                    Spacer(Modifier.height(12.dp))
+                    Card(modifier = Modifier.fillMaxWidth(), colors = CardDefaults.cardColors(containerColor = Color(0xFFFFE3E3)), shape = RoundedCornerShape(12.dp)) {
+                        AppText(dataError, color = Color(0xFFB00020), modifier = Modifier.padding(14.dp), fontSize = 14.sp)
+                    }
+                }
+
+                if (openSessions.isNotEmpty()) {
+                    Spacer(Modifier.height(18.dp))
+                    AppText("Rozpracované tréninky", color = TrainerAppNavy, fontSize = 20.sp, fontWeight = FontWeight.Bold)
+                    Spacer(Modifier.height(8.dp))
+                    openSessions.forEach { session ->
+                        OpenSessionCard(session) { onOpenSession(session.id) }
                     }
                 }
 
@@ -911,30 +1130,17 @@ private fun TrainerDashboard(
 
                 Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                     DashboardTile("👥", "Sportovci", Modifier.weight(1f)) { onNavigate("athletes") }
-                    DashboardTile("📅", "Kalendář", Modifier.weight(1f)) { onNavigate("calendar") }
+                    DashboardTile("📅", "Kalendář", Modifier.weight(1f), badgeCount = pendingCalendarCount) { onNavigate("calendar") }
                 }
                 Spacer(Modifier.height(12.dp))
                 Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                     DashboardTile("💬", "Chat", Modifier.weight(1f), badgeCount = unreadChatCount) { onNavigate("chat") }
                     DashboardTile("🏋️", "Spustit trénink", Modifier.weight(1f)) { onNavigate("training") }
                 }
-                Spacer(Modifier.height(20.dp))
-                OutlinedButton(onClick = onLogout, modifier = Modifier.fillMaxWidth()) { AppText("Odhlásit se") }
             }
 
-            BottomNavigationBar(current = "dashboard", unreadChatCount = unreadChatCount, onNavigate = onNavigate)
+            BottomNavigationBar(current = "dashboard", unreadChatCount = unreadChatCount, pendingCalendarCount = pendingCalendarCount, onNavigate = onNavigate)
         }
-    }
-
-    if (showServerDialog) {
-        ServerConfigDialog(
-            currentBaseUrl = currentBaseUrl,
-            onDismiss = { showServerDialog = false },
-            onSelect = { url ->
-                onBaseUrlChange(url)
-                showServerDialog = false
-            }
-        )
     }
 }
 
@@ -944,23 +1150,27 @@ private fun AthletesSectionScreen(
     token: String,
     context: Context,
     unreadChatCount: Int,
+    pendingCalendarCount: Int,
     isLoading: Boolean,
     onRefresh: () -> Unit,
     onNavigate: (String) -> Unit,
     onOpenChatWithAthlete: (String) -> Unit
 ) {
     var selectedAthleteDetail by remember { mutableStateOf<AthleteFullDetail?>(null) }
+    var openSessionId by remember { mutableStateOf<Int?>(null) }
     var isLoadingDetail by remember { mutableStateOf(false) }
+    var showAddAthlete by remember { mutableStateOf(false) }
 
     Surface(modifier = Modifier.fillMaxSize(), color = TrainerAppLight) {
         Column(modifier = Modifier.fillMaxSize().statusBarsPadding().navigationBarsPadding()) {
-            Row(modifier = Modifier.fillMaxWidth().background(TrainerAppNavy).padding(20.dp), verticalAlignment = Alignment.CenterVertically) {
+            Row(modifier = Modifier.fillMaxWidth().background(MetalHeaderBrush).padding(20.dp), verticalAlignment = Alignment.CenterVertically) {
                 AppText("👥", fontSize = 32.sp)
                 Spacer(Modifier.width(12.dp))
                 Column(Modifier.weight(1f)) {
                     AppText("Sportovci", color = Color.White, fontSize = 24.sp, fontWeight = FontWeight.Bold)
                     AppText("Seznam registrovaných sportovců z reservio.online", color = Color.White.copy(alpha = 0.7f), fontSize = 13.sp)
                 }
+                IconButton(onClick = { showAddAthlete = true }) { AppText("+", color = Color.White, fontSize = 28.sp, fontWeight = FontWeight.Bold) }
                 IconButton(onClick = onRefresh) { AppText("🔄", fontSize = 20.sp) }
             }
 
@@ -970,7 +1180,7 @@ private fun AthletesSectionScreen(
                         CircularProgressIndicator(color = TrainerAppNavy)
                     }
                 } else if (athletes.isEmpty()) {
-                    Card(modifier = Modifier.fillMaxWidth(), colors = CardDefaults.cardColors(containerColor = Color.White), shape = RoundedCornerShape(16.dp)) {
+                    Card(modifier = Modifier.fillMaxWidth(), colors = CardDefaults.cardColors(containerColor = MetalCard), shape = RoundedCornerShape(16.dp)) {
                         Column(modifier = Modifier.padding(20.dp), horizontalAlignment = Alignment.CenterHorizontally) {
                             AppText("👥", fontSize = 40.sp)
                             Spacer(Modifier.height(8.dp))
@@ -983,25 +1193,32 @@ private fun AthletesSectionScreen(
                     }
                 } else {
                     athletes.forEach { athlete ->
-                        AthleteCard(athlete) {
-                            isLoadingDetail = true
-                            fetchAthleteFullDetailApi(context, token, athlete.id,
-                                onSuccess = { fullDetail ->
-                                    isLoadingDetail = false
-                                    selectedAthleteDetail = fullDetail
-                                },
-                                onError = {
-                                    isLoadingDetail = false
-                                    selectedAthleteDetail = AthleteFullDetail(athlete.id, athlete.name, athlete.email, athlete.phone)
-                                }
-                            )
-                        }
+                        AthleteCard(
+                            athlete = athlete,
+                            onClick = {
+                                isLoadingDetail = true
+                                fetchAthleteFullDetailApi(context, token, athlete.id,
+                                    onSuccess = { fullDetail ->
+                                        isLoadingDetail = false
+                                        val fallback = recentTrainingsOf(athlete)
+                                        selectedAthleteDetail = if (fullDetail.trainings.isNotEmpty()) fullDetail else fullDetail.copy(trainings = fallback)
+                                    },
+                                    onError = {
+                                        isLoadingDetail = false
+                                        selectedAthleteDetail = AthleteFullDetail(
+                                            athlete.id, athlete.name, athlete.email, athlete.phone,
+                                            trainings = recentTrainingsOf(athlete)
+                                        )
+                                    }
+                                )
+                            }
+                        )
                         Spacer(Modifier.height(10.dp))
                     }
                 }
             }
 
-            BottomNavigationBar(current = "athletes", unreadChatCount = unreadChatCount, onNavigate = onNavigate)
+            BottomNavigationBar(current = "athletes", unreadChatCount = unreadChatCount, pendingCalendarCount = pendingCalendarCount, onNavigate = onNavigate)
         }
     }
 
@@ -1012,21 +1229,52 @@ private fun AthletesSectionScreen(
             onOpenChat = { athleteId ->
                 selectedAthleteDetail = null
                 onOpenChatWithAthlete(athleteId)
+            },
+            onOpenTraining = { sessionId ->
+                selectedAthleteDetail = null
+                openSessionId = sessionId
             }
         )
+    }
+
+    if (openSessionId != null) {
+        PastTrainingDialog(
+            sessionId = openSessionId!!,
+            token = token,
+            context = context,
+            onDismiss = { openSessionId = null }
+        )
+    }
+
+    if (showAddAthlete) {
+        AddAthleteDialog(
+            token = token,
+            context = context,
+            onDismiss = { showAddAthlete = false },
+            onCreated = {
+                showAddAthlete = false
+                onRefresh()
+            }
+        )
+    }
+}
+
+private fun recentTrainingsOf(athlete: AthleteItem): List<TrainingItem> {
+    return athlete.recentTrainings.map { training ->
+        TrainingItem(id = training.id, time = training.date, athleteName = athlete.name, detail = training.setName)
     }
 }
 
 @Composable
 private fun AthleteCard(athlete: AthleteItem, onClick: () -> Unit) {
     Card(
-        modifier = Modifier.fillMaxWidth().clickable { onClick() },
-        colors = CardDefaults.cardColors(containerColor = Color.White),
+        modifier = Modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(containerColor = MetalCard),
         shape = RoundedCornerShape(16.dp)
     ) {
         Column(Modifier.padding(16.dp)) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Box(modifier = Modifier.size(44.dp).clip(RoundedCornerShape(12.dp)).background(TrainerAppNavy), contentAlignment = Alignment.Center) {
+            Row(modifier = Modifier.fillMaxWidth().clickable { onClick() }, verticalAlignment = Alignment.CenterVertically) {
+                Box(modifier = Modifier.size(44.dp).clip(RoundedCornerShape(12.dp)).background(MetalHeaderBrush), contentAlignment = Alignment.Center) {
                     AppText(athlete.name.take(1).uppercase(), color = Color.White, fontSize = 18.sp, fontWeight = FontWeight.Bold)
                 }
                 Spacer(Modifier.width(12.dp))
@@ -1036,10 +1284,9 @@ private fun AthleteCard(athlete: AthleteItem, onClick: () -> Unit) {
                 }
                 AppText("▶", color = TrainerAppGray, fontSize = 14.sp)
             }
-            if (athlete.phone.isNotBlank() || athlete.detail.isNotBlank()) {
-                Spacer(Modifier.height(10.dp))
-                if (athlete.phone.isNotBlank()) AppText("📞 ${athlete.phone}", color = TrainerAppNavy, fontSize = 13.sp)
-                if (athlete.detail.isNotBlank()) AppText("📝 ${athlete.detail}", color = TrainerAppGray, fontSize = 13.sp)
+            if (athlete.phone.isNotBlank()) {
+                Spacer(Modifier.height(8.dp))
+                AppText("📞 ${athlete.phone}", color = TrainerAppNavy, fontSize = 13.sp)
             }
         }
     }
@@ -1049,9 +1296,11 @@ private fun AthleteCard(athlete: AthleteItem, onClick: () -> Unit) {
 private fun AthleteDetailDialog(
     detail: AthleteFullDetail,
     onDismiss: () -> Unit,
-    onOpenChat: (String) -> Unit
+    onOpenChat: (String) -> Unit,
+    onOpenTraining: (Int) -> Unit
 ) {
     AlertDialog(
+        modifier = Modifier.imePadding(),
         onDismissRequest = onDismiss,
         title = {
             Row(verticalAlignment = Alignment.CenterVertically) {
@@ -1073,12 +1322,12 @@ private fun AthleteDetailDialog(
                 if (detail.phone.isNotBlank()) AppText("📞 ${detail.phone}", fontSize = 13.sp, color = TrainerAppNavy)
 
                 Spacer(Modifier.height(16.dp))
-                AppText("Historie váhy", color = TrainerAppNavy, fontSize = 16.sp, fontWeight = FontWeight.Bold)
+                AppText("Poslední váha", color = TrainerAppNavy, fontSize = 16.sp, fontWeight = FontWeight.Bold)
                 Spacer(Modifier.height(6.dp))
                 if (detail.weightLogs.isEmpty()) {
                     AppText("Žádné záznamy o váze.", fontSize = 12.sp, color = TrainerAppGray)
                 } else {
-                    detail.weightLogs.take(5).forEach { log ->
+                    detail.weightLogs.take(1).forEach { log ->
                         Row(modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp), horizontalArrangement = Arrangement.SpaceBetween) {
                             AppText(log.date, fontSize = 12.sp, color = TrainerAppGray)
                             AppText("${log.weightKg} kg", fontSize = 12.sp, fontWeight = FontWeight.Bold, color = TrainerAppNavy)
@@ -1087,15 +1336,23 @@ private fun AthleteDetailDialog(
                 }
 
                 Spacer(Modifier.height(16.dp))
-                AppText("Historie tréninků", color = TrainerAppNavy, fontSize = 16.sp, fontWeight = FontWeight.Bold)
+                AppText("Poslední tréninky", color = TrainerAppNavy, fontSize = 16.sp, fontWeight = FontWeight.Bold)
                 Spacer(Modifier.height(6.dp))
                 if (detail.trainings.isEmpty()) {
                     AppText("Žádná historie tréninků.", fontSize = 12.sp, color = TrainerAppGray)
                 } else {
-                    detail.trainings.take(8).forEach { tr ->
-                        Card(modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp), colors = CardDefaults.cardColors(containerColor = TrainerAppLight)) {
+                    detail.trainings.take(3).forEach { tr ->
+                        val sessionId = tr.id.toIntOrNull()
+                        val canOpen = sessionId != null && sessionId in 1..99999
+                        Card(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(vertical = 4.dp)
+                                .clickable(enabled = canOpen) { if (sessionId != null) onOpenTraining(sessionId) },
+                            colors = CardDefaults.cardColors(containerColor = TrainerAppLight)
+                        ) {
                             Column(Modifier.padding(10.dp)) {
-                                AppText(tr.time, fontSize = 11.sp, color = TrainerAppGray)
+                                AppText(formatTrainingDate(tr.time), fontSize = 12.sp, color = TrainerAppGray)
                                 AppText(tr.detail, fontSize = 14.sp, fontWeight = FontWeight.Bold, color = TrainerAppNavy)
                             }
                         }
@@ -1111,6 +1368,101 @@ private fun AthleteDetailDialog(
         dismissButton = {
             TextButton(onClick = onDismiss) { AppText("Zavřít") }
         }
+    )
+}
+
+private fun dateStringToUtcMillis(date: String): Long? {
+    val parts = date.split("-")
+    if (parts.size != 3) return null
+    val year = parts[0].toIntOrNull() ?: return null
+    val month = parts[1].toIntOrNull() ?: return null
+    val day = parts[2].toIntOrNull() ?: return null
+    val cal = Calendar.getInstance(java.util.TimeZone.getTimeZone("UTC"))
+    cal.set(year, month - 1, day, 0, 0, 0)
+    cal.set(Calendar.MILLISECOND, 0)
+    return cal.timeInMillis
+}
+
+private fun utcMillisToDateString(millis: Long): String {
+    val cal = Calendar.getInstance(java.util.TimeZone.getTimeZone("UTC"))
+    cal.timeInMillis = millis
+    return String.format(Locale.US, "%04d-%02d-%02d", cal.get(Calendar.YEAR), cal.get(Calendar.MONTH) + 1, cal.get(Calendar.DAY_OF_MONTH))
+}
+
+private fun formatTrainingDate(raw: String): String {
+    val datePart = raw.trim().take(10)
+    val parts = datePart.split("-")
+    if (parts.size != 3) return raw.ifBlank { "Bez data" }
+    val day = parts[2].toIntOrNull() ?: return raw
+    val month = parts[1].toIntOrNull() ?: return raw
+    return "$day. $month. ${parts[0]}"
+}
+
+@Composable
+private fun PastTrainingDialog(
+    sessionId: Int,
+    token: String,
+    context: Context,
+    onDismiss: () -> Unit
+) {
+    var sessionData by remember { mutableStateOf<JSONObject?>(null) }
+    var exercises by remember { mutableStateOf<List<SessionExerciseItem>>(emptyList()) }
+    var isLoading by remember { mutableStateOf(true) }
+    var errorText by remember { mutableStateOf("") }
+
+    LaunchedEffect(sessionId) {
+        fetchActiveSessionDetailApi(
+            context, token, sessionId,
+            onSuccess = { sess, list ->
+                isLoading = false
+                sessionData = sess
+                exercises = list
+            },
+            onError = {
+                isLoading = false
+                errorText = it
+            }
+        )
+    }
+
+    AlertDialog(
+        modifier = Modifier.imePadding(),
+        onDismissRequest = onDismiss,
+        title = {
+            Column {
+                AppText(sessionData?.optString("workout_set_name", "Trénink") ?: "Trénink", color = TrainerAppNavy, fontWeight = FontWeight.Bold)
+                val whenText = sessionData?.optString("completed_at", "")?.ifBlank { sessionData?.optString("started_at", "") ?: "" } ?: ""
+                if (whenText.isNotBlank()) AppText(formatTrainingDate(whenText), color = TrainerAppGray, fontSize = 13.sp)
+            }
+        },
+        text = {
+            Column(modifier = Modifier.fillMaxWidth().verticalScroll(rememberScrollState())) {
+                if (isLoading) {
+                    CircularProgressIndicator(color = TrainerAppNavy)
+                } else if (errorText.isNotBlank()) {
+                    AppText(errorText, color = Color(0xFFB00020), fontSize = 14.sp)
+                } else if (exercises.isEmpty()) {
+                    AppText("V tomhle tréninku nejsou uložené série.", color = TrainerAppGray, fontSize = 14.sp)
+                } else {
+                    exercises.forEach { exercise ->
+                        AppText("${exercise.exerciseOrder}. ${exercise.exerciseName}", color = TrainerAppNavy, fontSize = 15.sp, fontWeight = FontWeight.Bold)
+                        if (exercise.series.isEmpty()) {
+                            AppText("Bez sérií", color = TrainerAppGray, fontSize = 13.sp)
+                        } else {
+                            exercise.series.forEach { series ->
+                                AppText(
+                                    "Série ${series.seriesOrder}: ${series.weight} kg × ${series.reps} op",
+                                    color = TrainerAppGray,
+                                    fontSize = 13.sp
+                                )
+                            }
+                        }
+                        Spacer(Modifier.height(8.dp))
+                    }
+                }
+            }
+        },
+        confirmButton = { TextButton(onClick = onDismiss) { AppText("Zavřít") } }
     )
 }
 
@@ -1153,6 +1505,7 @@ private fun CalendarSectionScreen(
     token: String,
     context: Context,
     unreadChatCount: Int,
+    pendingCalendarCount: Int,
     isLoading: Boolean,
     onRefresh: () -> Unit,
     onNavigate: (String) -> Unit
@@ -1175,32 +1528,55 @@ private fun CalendarSectionScreen(
     }
 
     var showCreateDialog by remember { mutableStateOf(false) }
+    var createDate by remember { mutableStateOf("") }
+    var createHour by remember { mutableIntStateOf(9) }
     var selectedEventForAction by remember { mutableStateOf<TrainingItem?>(null) }
     var selectedActionHour by remember { mutableIntStateOf(0) }
 
     val hours = (5..21).toList()
 
-    Surface(modifier = Modifier.fillMaxSize(), color = Color(0xFFF9F6F0)) {
+    Surface(modifier = Modifier.fillMaxSize(), color = TrainerAppLight) {
         Column(modifier = Modifier.fillMaxSize().statusBarsPadding().navigationBarsPadding()) {
             Row(
-                modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp),
-                horizontalArrangement = Arrangement.SpaceBetween,
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 AppText(weekHeader, color = TrainerAppNavy, fontSize = 22.sp, fontWeight = FontWeight.Bold)
-
-                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                    IconButton(onClick = { weekOffset-- }, modifier = Modifier.size(36.dp)) {
-                        AppText("←", color = TrainerAppNavy, fontSize = 20.sp, fontWeight = FontWeight.Bold)
-                    }
-                    IconButton(onClick = { weekOffset++ }, modifier = Modifier.size(36.dp)) {
-                        AppText("→", color = TrainerAppNavy, fontSize = 20.sp, fontWeight = FontWeight.Bold)
-                    }
-                    IconButton(onClick = { showCreateDialog = true }, modifier = Modifier.size(36.dp)) {
-                        AppText("➕", fontSize = 18.sp)
+                Spacer(Modifier.width(4.dp))
+                CompositionLocalProvider(LocalMinimumInteractiveComponentSize provides Dp.Unspecified) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Box(
+                            modifier = Modifier.size(32.dp).clip(CircleShape).clickable { weekOffset-- },
+                            contentAlignment = Alignment.Center
+                        ) { AppText("‹", color = TrainerAppNavy, fontSize = 28.sp, fontWeight = FontWeight.Bold) }
+                        Box(
+                            modifier = Modifier.size(32.dp).clip(CircleShape).clickable { weekOffset++ },
+                            contentAlignment = Alignment.Center
+                        ) { AppText("›", color = TrainerAppNavy, fontSize = 28.sp, fontWeight = FontWeight.Bold) }
                     }
                 }
+                Spacer(Modifier.weight(1f))
+                Box(
+                    modifier = Modifier
+                        .size(36.dp)
+                        .clip(CircleShape)
+                        .background(MetalGoldBrush)
+                        .clickable {
+                            createDate = weekDays[selectedDayIndex].second
+                            createHour = 9
+                            showCreateDialog = true
+                        },
+                    contentAlignment = Alignment.Center
+                ) { AppText("+", color = TrainerAppNavy, fontSize = 24.sp, fontWeight = FontWeight.Bold) }
             }
+
+            val pendingBlink = rememberInfiniteTransition(label = "pendingDot")
+            val pendingAlpha by pendingBlink.animateFloat(
+                initialValue = 1f,
+                targetValue = 0.15f,
+                animationSpec = infiniteRepeatable(tween(durationMillis = 520), RepeatMode.Reverse),
+                label = "pendingDotAlpha"
+            )
 
             Row(
                 modifier = Modifier.fillMaxWidth().padding(horizontal = 4.dp, vertical = 4.dp),
@@ -1209,7 +1585,10 @@ private fun CalendarSectionScreen(
                 weekDays.forEachIndexed { index, (dayLabel, dateStr) ->
                     val isSelected = index == selectedDayIndex
                     val isToday = dateStr == todayDateStr
-                    val hasEvents = trainings.any { it.date == dateStr }
+                    val needsAttention = trainings.any {
+                        it.date == dateStr && !it.isLocked && (it.approvalStatus.equals("pending", true) || it.awaitingReschedule)
+                    }
+                    val hasEvents = trainings.any { it.date == dateStr && !it.isLocked }
 
                     Column(
                         horizontalAlignment = Alignment.CenterHorizontally,
@@ -1223,7 +1602,7 @@ private fun CalendarSectionScreen(
                                 .background(
                                     when {
                                         isSelected -> TrainerAppYellow
-                                        isToday -> Color(0xFFFFECB3)
+                                        isToday -> Color(0xFFF3E6C4)
                                         else -> Color.Transparent
                                     }
                                 )
@@ -1240,13 +1619,17 @@ private fun CalendarSectionScreen(
                             )
                         }
 
-                        if (hasEvents) {
+                        if (needsAttention || hasEvents) {
                             Spacer(Modifier.height(3.dp))
                             Box(
                                 modifier = Modifier
-                                    .size(6.dp)
+                                    .size(if (needsAttention) 8.dp else 6.dp)
                                     .clip(CircleShape)
-                                    .background(if (isSelected) TrainerAppNavy else TrainerAppYellow)
+                                    .background(
+                                        if (needsAttention) Color(0xFFD32F2F).copy(alpha = pendingAlpha)
+                                        else if (isSelected) TrainerAppNavy
+                                        else TrainerAppYellow
+                                    )
                             )
                         }
                     }
@@ -1278,37 +1661,23 @@ private fun CalendarSectionScreen(
                             AppText(hourStr, fontSize = 12.sp, color = TrainerAppGray)
                         }
 
-                        Box(modifier = Modifier.weight(1f).fillMaxSize().background(Color(0xFFF2EFE8)).border(0.5.dp, Color(0xFFE0DCD3))) {
+                        Box(
+                            modifier = Modifier
+                                .weight(1f)
+                                .fillMaxSize()
+                                .background(Color(0xFFF2EFE8))
+                                .border(0.5.dp, Color(0xFFE0DCD3))
+                                .clickable(enabled = hourEvents.isEmpty()) {
+                                    createDate = weekDays[selectedDayIndex].second
+                                    createHour = hour
+                                    showCreateDialog = true
+                                }
+                        ) {
                             if (hourEvents.isNotEmpty()) {
                                 hourEvents.forEach { ev ->
-                                    Card(
-                                        modifier = Modifier
-                                            .fillMaxSize()
-                                            .padding(2.dp)
-                                            .clickable { 
-                                                selectedEventForAction = ev 
-                                                selectedActionHour = hour
-                                            },
-                                        colors = CardDefaults.cardColors(
-                                            containerColor = when {
-                                                ev.isLocked -> Color(0xFFD6D3CC)
-                                                ev.approvalStatus == "pending" -> Color(0xFFFFECB3)
-                                                else -> TrainerAppYellow
-                                            }
-                                        ),
-                                        shape = RoundedCornerShape(8.dp)
-                                    ) {
-                                        Column(Modifier.padding(6.dp)) {
-                                            AppText(
-                                                text = if (ev.isLocked) "🔒 ${ev.detail}" else "${ev.time} - ${ev.athleteName}",
-                                                fontSize = 12.sp,
-                                                fontWeight = FontWeight.Bold,
-                                                color = TrainerAppNavy
-                                            )
-                                            if (!ev.isLocked && ev.detail.isNotBlank()) {
-                                                AppText(ev.detail, fontSize = 10.sp, color = TrainerAppNavy.copy(alpha = 0.8f))
-                                            }
-                                        }
+                                    CalendarSlotEvent(ev) {
+                                        selectedEventForAction = ev
+                                        selectedActionHour = hour
                                     }
                                 }
                             }
@@ -1317,7 +1686,7 @@ private fun CalendarSectionScreen(
                 }
             }
 
-            BottomNavigationBar(current = "calendar", unreadChatCount = unreadChatCount, onNavigate = onNavigate)
+            BottomNavigationBar(current = "calendar", unreadChatCount = unreadChatCount, pendingCalendarCount = pendingCalendarCount, onNavigate = onNavigate)
         }
     }
 
@@ -1327,6 +1696,8 @@ private fun CalendarSectionScreen(
             venues = venues,
             token = token,
             context = context,
+            initialDate = createDate.ifBlank { weekDays[selectedDayIndex].second },
+            initialStartHour = createHour,
             onDismiss = { showCreateDialog = false },
             onCreated = {
                 showCreateDialog = false
@@ -1338,6 +1709,7 @@ private fun CalendarSectionScreen(
     if (selectedEventForAction != null) {
         CalendarEventActionDialog(
             event = selectedEventForAction!!,
+            athletes = athletes,
             actionHour = selectedActionHour,
             token = token,
             context = context,
@@ -1352,13 +1724,14 @@ private fun CalendarSectionScreen(
 
 @Composable
 private fun ChatSectionScreen(
-    athletes: List<AthleteItem>,
     initialConversations: List<ChatConversation>,
     selectedConversationId: String?,
     unreadChatCount: Int,
+    pendingCalendarCount: Int,
     token: String,
     context: Context,
-    onNavigate: (String) -> Unit
+    onNavigate: (String) -> Unit,
+    onConversationRead: () -> Unit
 ) {
     var conversations by remember(initialConversations) { mutableStateOf(initialConversations) }
     var selectedConversation by remember { mutableStateOf<ChatConversation?>(null) }
@@ -1384,11 +1757,21 @@ private fun ChatSectionScreen(
     }
 
     if (selectedConversation != null) {
-        ChatDetailScreen(conversation = selectedConversation!!, token = token, context = context, onBack = { selectedConversation = null })
+        ChatDetailScreen(
+            conversation = selectedConversation!!,
+            token = token,
+            context = context,
+            unreadChatCount = unreadChatCount,
+            pendingCalendarCount = pendingCalendarCount,
+            onBack = { selectedConversation = null },
+            onNavigate = onNavigate,
+            onConversationRead = onConversationRead
+        )
     } else {
         ChatListScreen(
-            conversations = if (conversations.isNotEmpty()) conversations else createDefaultConversations(athletes),
+            conversations = conversations,
             unreadChatCount = unreadChatCount,
+            pendingCalendarCount = pendingCalendarCount,
             onSelectConversation = { selectedConversation = it },
             onNavigate = onNavigate
         )
@@ -1403,25 +1786,27 @@ private fun TrainingScreen(
     token: String,
     context: Context,
     activeSessionId: Int,
+    openSessions: List<OpenSession>,
     unreadChatCount: Int,
+    pendingCalendarCount: Int,
     onSessionStarted: (Int) -> Unit,
     onSessionCompleted: () -> Unit,
     onBack: () -> Unit,
     onNavigate: (String) -> Unit
 ) {
-    var selectedAthlete by remember { mutableStateOf<AthleteItem?>(athletes.firstOrNull()) }
+    var selectedAthlete by remember { mutableStateOf<AthleteItem?>(null) }
     var dropdownExpanded by remember { mutableStateOf(false) }
     var isStarting by remember { mutableStateOf(false) }
     var statusMessage by remember { mutableStateOf("") }
     var isError by remember { mutableStateOf(false) }
     var pendingSetToStart by remember { mutableStateOf<WorkoutSetItem?>(null) }
+    var knownOpenSessions by remember(openSessions) { mutableStateOf(openSessions) }
+    var conflictSessionId by remember { mutableIntStateOf(0) }
+    var conflictMessage by remember { mutableStateOf("") }
 
-    val activeSets = if (workoutSets.isNotEmpty()) workoutSets else listOf(
-        WorkoutSetItem(1, "Silový trénink", "60 min • 8 cviků", 8, isGlobal = false),
-        WorkoutSetItem(2, "Full Body", "55 min • 10 cviků", 10, isGlobal = false),
-        WorkoutSetItem(3, "Hyrox", "75 min • běh + stanoviště", 12, isGlobal = false),
-        WorkoutSetItem(4, "Kondiční trénink", "45 min • 6 cviků", 6, isGlobal = false)
-    )
+    LaunchedEffect(Unit) {
+        fetchOpenSessions(context, token) { knownOpenSessions = it }
+    }
 
     if (activeSessionId > 0) {
         ActiveSessionView(
@@ -1437,7 +1822,7 @@ private fun TrainingScreen(
 
     Surface(modifier = Modifier.fillMaxSize(), color = TrainerAppLight) {
         Column(modifier = Modifier.fillMaxSize().statusBarsPadding().navigationBarsPadding()) {
-            Row(modifier = Modifier.fillMaxWidth().background(TrainerAppNavy).padding(18.dp), verticalAlignment = Alignment.CenterVertically) {
+            Row(modifier = Modifier.fillMaxWidth().background(MetalHeaderBrush).padding(18.dp), verticalAlignment = Alignment.CenterVertically) {
                 AppText("🏋️", fontSize = 30.sp)
                 Spacer(Modifier.width(12.dp))
                 Column {
@@ -1447,20 +1832,31 @@ private fun TrainingScreen(
             }
 
             Column(modifier = Modifier.weight(1f).fillMaxWidth().verticalScroll(rememberScrollState()).padding(18.dp)) {
+                if (knownOpenSessions.isNotEmpty()) {
+                    AppText("Rozpracované tréninky", color = TrainerAppNavy, fontSize = 18.sp, fontWeight = FontWeight.Bold)
+                    Spacer(Modifier.height(8.dp))
+                    AppText("Než půjde spustit nový trénink, tenhle je potřeba dokončit.", color = TrainerAppGray, fontSize = 13.sp)
+                    Spacer(Modifier.height(8.dp))
+                    knownOpenSessions.forEach { session ->
+                        OpenSessionCard(session) { onSessionStarted(session.id) }
+                    }
+                    Spacer(Modifier.height(20.dp))
+                }
+
                 AppText("Vyberte sportovce", color = TrainerAppNavy, fontSize = 18.sp, fontWeight = FontWeight.Bold)
                 Spacer(Modifier.height(8.dp))
 
                 if (athletes.isEmpty()) {
-                    Card(modifier = Modifier.fillMaxWidth(), colors = CardDefaults.cardColors(containerColor = Color.White), shape = RoundedCornerShape(12.dp)) {
+                    Card(modifier = Modifier.fillMaxWidth(), colors = CardDefaults.cardColors(containerColor = MetalCard), shape = RoundedCornerShape(12.dp)) {
                         AppText("Žádní sportovci nenačteni. Nejprve obnovte seznam sportovců.", color = TrainerAppGray, modifier = Modifier.padding(14.dp), fontSize = 14.sp)
                     }
                 } else {
                     Box(modifier = Modifier.fillMaxWidth()) {
-                        Card(modifier = Modifier.fillMaxWidth().clickable { dropdownExpanded = true }, colors = CardDefaults.cardColors(containerColor = Color.White), shape = RoundedCornerShape(12.dp)) {
+                        Card(modifier = Modifier.fillMaxWidth().clickable { dropdownExpanded = true }, colors = CardDefaults.cardColors(containerColor = MetalCard), shape = RoundedCornerShape(12.dp)) {
                             Row(modifier = Modifier.padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
                                 AppText("👤", fontSize = 20.sp)
                                 Spacer(Modifier.width(12.dp))
-                                AppText(selectedAthlete?.name ?: "Vyberte sportovce", color = TrainerAppNavy, fontSize = 16.sp, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
+                                AppText(selectedAthlete?.name ?: "Vyberte", color = if (selectedAthlete == null) TrainerAppGray else TrainerAppNavy, fontSize = 16.sp, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
                                 AppText("▼", color = TrainerAppGray, fontSize = 12.sp)
                             }
                         }
@@ -1487,8 +1883,12 @@ private fun TrainingScreen(
                     Box(modifier = Modifier.fillMaxWidth().height(100.dp), contentAlignment = Alignment.Center) {
                         CircularProgressIndicator(color = TrainerAppNavy)
                     }
+                } else if (workoutSets.isEmpty()) {
+                    Card(modifier = Modifier.fillMaxWidth(), colors = CardDefaults.cardColors(containerColor = MetalCard), shape = RoundedCornerShape(12.dp)) {
+                        AppText("Na účtu nejsou žádné tréninkové sady.", color = TrainerAppGray, modifier = Modifier.padding(14.dp), fontSize = 14.sp)
+                    }
                 } else {
-                    activeSets.forEach { set ->
+                    workoutSets.forEach { set ->
                         TrainingSetCard(set) {
                             if (selectedAthlete == null) {
                                 isError = true
@@ -1504,13 +1904,14 @@ private fun TrainingScreen(
                 OutlinedButton(onClick = onBack, modifier = Modifier.fillMaxWidth()) { AppText("Zpět") }
             }
 
-            BottomNavigationBar(current = "", unreadChatCount = unreadChatCount, onNavigate = onNavigate)
+            BottomNavigationBar(current = "", unreadChatCount = unreadChatCount, pendingCalendarCount = pendingCalendarCount, onNavigate = onNavigate)
         }
     }
 
     if (pendingSetToStart != null) {
         val set = pendingSetToStart!!
         AlertDialog(
+        modifier = Modifier.imePadding(),
             onDismissRequest = { pendingSetToStart = null },
             title = { AppText("Spustit trénink?", color = TrainerAppNavy, fontWeight = FontWeight.Bold) },
             text = { AppText("Opravdu chcete spustit trénink '${set.name}' pro sportovce ${selectedAthlete?.name}?", fontSize = 14.sp) },
@@ -1534,7 +1935,14 @@ private fun TrainingScreen(
                                     statusMessage = "Trénink byl spuštěn!"
                                 }
                             },
-                            onError = { err -> isStarting = false; isError = true; statusMessage = err }
+                            onError = { err -> isStarting = false; isError = true; statusMessage = err },
+                            onExistingSession = { existingId, message ->
+                                isStarting = false
+                                isError = false
+                                statusMessage = ""
+                                conflictSessionId = existingId
+                                conflictMessage = message
+                            }
                         )
                     },
                     colors = ButtonDefaults.buttonColors(containerColor = TrainerAppYellow, contentColor = TrainerAppNavy)
@@ -1544,6 +1952,46 @@ private fun TrainingScreen(
             },
             dismissButton = { TextButton(onClick = { pendingSetToStart = null }) { AppText("Zrušit") } }
         )
+    }
+
+    if (conflictSessionId > 0) {
+        AlertDialog(
+            modifier = Modifier.imePadding(),
+            onDismissRequest = { conflictSessionId = 0 },
+            title = { AppText("Rozpracovaný trénink", color = TrainerAppNavy, fontWeight = FontWeight.Bold) },
+            text = { AppText(conflictMessage.ifBlank { "Sportovec už má rozpracovaný trénink. Otevřete ho a dokončete, nebo v něm pokračujte." }, fontSize = 14.sp) },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        val sessionId = conflictSessionId
+                        conflictSessionId = 0
+                        onSessionStarted(sessionId)
+                    },
+                    colors = ButtonDefaults.buttonColors(containerColor = TrainerAppYellow, contentColor = TrainerAppNavy)
+                ) {
+                    AppText("Pokračovat", fontWeight = FontWeight.Bold)
+                }
+            },
+            dismissButton = { TextButton(onClick = { conflictSessionId = 0 }) { AppText("Zavřít") } }
+        )
+    }
+}
+
+@Composable
+private fun OpenSessionCard(session: OpenSession, onContinue: () -> Unit) {
+    Card(
+        modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp).clickable(onClick = onContinue),
+        colors = CardDefaults.cardColors(containerColor = Color(0xFFFFF4E5)),
+        shape = RoundedCornerShape(12.dp)
+    ) {
+        Row(modifier = Modifier.padding(14.dp), verticalAlignment = Alignment.CenterVertically) {
+            Column(Modifier.weight(1f)) {
+                AppText(session.athleteName, color = TrainerAppNavy, fontSize = 15.sp, fontWeight = FontWeight.Bold)
+                val whenText = formatTrainingDate(session.startedAt)
+                AppText("${session.setName} · $whenText", color = TrainerAppGray, fontSize = 12.sp)
+            }
+            AppText("Pokračovat", color = TrainerAppNavy, fontSize = 13.sp, fontWeight = FontWeight.Bold)
+        }
     }
 }
 
@@ -1559,6 +2007,7 @@ private fun ActiveSessionView(
     var sessionData by remember { mutableStateOf<JSONObject?>(null) }
     var exercises by remember { mutableStateOf<List<SessionExerciseItem>>(emptyList()) }
     var isLoading by remember { mutableStateOf(true) }
+    var sessionError by remember { mutableStateOf("") }
     var showCompleteDialog by remember { mutableStateOf(false) }
 
     var showAddExerciseDialog by remember { mutableStateOf(false) }
@@ -1567,13 +2016,17 @@ private fun ActiveSessionView(
 
     fun loadSession() {
         isLoading = true
+        sessionError = ""
         fetchActiveSessionDetailApi(context, token, sessionId,
             onSuccess = { sessObj, exList ->
                 isLoading = false
                 sessionData = sessObj
                 exercises = exList
             },
-            onError = { isLoading = false }
+            onError = { message ->
+                isLoading = false
+                sessionError = message
+            }
         )
     }
 
@@ -1581,13 +2034,19 @@ private fun ActiveSessionView(
 
     Surface(modifier = Modifier.fillMaxSize(), color = TrainerAppLight) {
         Column(modifier = Modifier.fillMaxSize().statusBarsPadding().navigationBarsPadding()) {
-            Row(modifier = Modifier.fillMaxWidth().background(TrainerAppNavy).padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
+            Row(modifier = Modifier.fillMaxWidth().background(MetalHeaderBrush).padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
                 Column(Modifier.weight(1f)) {
                     AppText("Aktivní trénink #${sessionId}", color = Color.White, fontSize = 20.sp, fontWeight = FontWeight.Bold)
                     if (sessionData != null) {
                         val athName = sessionData!!.optString("athlete_name", "")
                         val setName = sessionData!!.optString("workout_set_name", "")
                         AppText("$athName • $setName", color = Color.White.copy(alpha = 0.8f), fontSize = 13.sp)
+                        if (sessionData!!.has("athlete_weight_kg") && !sessionData!!.isNull("athlete_weight_kg")) {
+                            val weight = sessionData!!.optDouble("athlete_weight_kg")
+                            val measured = sessionData!!.optString("athlete_weight_at", "").take(10)
+                            val whenText = if (measured.isNotBlank()) " (${formatTrainingDate(measured)})" else ""
+                            AppText("Poslední váha: ${formatKg(weight.toFloat())} kg$whenText", color = Color.White.copy(alpha = 0.9f), fontSize = 13.sp)
+                        }
                     }
                 }
                 Button(onClick = { showCompleteDialog = true }, colors = ButtonDefaults.buttonColors(containerColor = TrainerAppYellow, contentColor = TrainerAppNavy)) {
@@ -1600,8 +2059,12 @@ private fun ActiveSessionView(
                     Box(modifier = Modifier.fillMaxWidth().height(150.dp), contentAlignment = Alignment.Center) {
                         CircularProgressIndicator(color = TrainerAppNavy)
                     }
+                } else if (sessionError.isNotBlank()) {
+                    Card(modifier = Modifier.fillMaxWidth(), colors = CardDefaults.cardColors(containerColor = Color(0xFFFFE3E3))) {
+                        AppText(sessionError, color = Color(0xFFB00020), modifier = Modifier.padding(16.dp), fontSize = 14.sp)
+                    }
                 } else if (exercises.isEmpty()) {
-                    Card(modifier = Modifier.fillMaxWidth(), colors = CardDefaults.cardColors(containerColor = Color.White)) {
+                    Card(modifier = Modifier.fillMaxWidth(), colors = CardDefaults.cardColors(containerColor = MetalCard)) {
                         AppText("Žádné cviky v tréninku.", modifier = Modifier.padding(16.dp), fontSize = 14.sp)
                     }
                 } else {
@@ -1616,9 +2079,9 @@ private fun ActiveSessionView(
                     onClick = {
                         showAddExerciseDialog = true
                         if (allAvailableExercises.isEmpty()) {
-                            fetchExercisesApi(context, token) { result ->
+                            fetchExercisesApi(context, token, onSuccess = { result ->
                                 allAvailableExercises = result
-                            }
+                            }, onError = { sessionError = it })
                         }
                     },
                     modifier = Modifier.fillMaxWidth(),
@@ -1636,6 +2099,7 @@ private fun ActiveSessionView(
         val filteredExercises = allAvailableExercises.filter { it.name.contains(searchQuery, ignoreCase = true) }
 
         AlertDialog(
+        modifier = Modifier.imePadding(),
             onDismissRequest = { showAddExerciseDialog = false },
             title = { AppText("Přidat cvik", color = TrainerAppNavy, fontWeight = FontWeight.Bold) },
             text = {
@@ -1713,27 +2177,55 @@ private fun ActiveExerciseCard(
     var repsInput by remember { mutableStateOf("") }
     var isSaving by remember { mutableStateOf(false) }
 
-    Card(modifier = Modifier.fillMaxWidth(), colors = CardDefaults.cardColors(containerColor = Color.White), shape = RoundedCornerShape(16.dp)) {
-        Column(Modifier.padding(16.dp)) {
-            AppText("${ex.exerciseOrder}. ${ex.exerciseName}", color = TrainerAppNavy, fontSize = 17.sp, fontWeight = FontWeight.Bold)
-            Spacer(Modifier.height(8.dp))
-
-            if (ex.series.isNotEmpty()) {
-                ex.series.forEach { s ->
-                    Row(modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp), horizontalArrangement = Arrangement.SpaceBetween) {
-                        AppText("Série ${s.seriesOrder}:", fontSize = 13.sp, color = TrainerAppGray)
-                        AppText("${s.weight} kg × ${s.reps} op", fontSize = 13.sp, fontWeight = FontWeight.Bold, color = TrainerAppNavy)
-                    }
-                }
-                Spacer(Modifier.height(8.dp))
+    val compactField = TextStyle(fontSize = 14.sp, color = TrainerAppNavy)
+    Card(modifier = Modifier.fillMaxWidth(), colors = CardDefaults.cardColors(containerColor = MetalCard), shape = RoundedCornerShape(14.dp)) {
+        Column(Modifier.padding(horizontal = 12.dp, vertical = 10.dp)) {
+            AppText("${ex.exerciseOrder}. ${ex.exerciseName}", color = TrainerAppNavy, fontSize = 16.sp, fontWeight = FontWeight.Bold)
+            if (ex.previousSeries.isNotEmpty()) {
+                Spacer(Modifier.height(4.dp))
+                AppText(
+                    "Minule${if (ex.previousLabel.isNotBlank()) " · ${ex.previousLabel}" else ""}",
+                    fontSize = 11.sp,
+                    color = TrainerAppGray
+                )
+                AppText(
+                    ex.previousSeries.joinToString("   ") { "${it.seriesOrder}. ${formatKg(it.weight)} kg × ${it.reps}" },
+                    fontSize = 12.sp,
+                    color = TrainerAppNavy
+                )
             }
-
-            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-                OutlinedTextField(value = weightInput, onValueChange = { weightInput = it }, label = { AppText("Váha (kg)") }, modifier = Modifier.weight(1f), singleLine = true)
-                OutlinedTextField(value = repsInput, onValueChange = { repsInput = it }, label = { AppText("Opakování") }, modifier = Modifier.weight(1f), singleLine = true)
+            if (ex.series.isNotEmpty()) {
+                Spacer(Modifier.height(4.dp))
+                AppText(
+                    "Teď: " + ex.series.joinToString("   ") { "${it.seriesOrder}. ${formatKg(it.weight)} kg × ${it.reps}" },
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = TrainerAppNavy
+                )
+            }
+            Spacer(Modifier.height(6.dp))
+            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
+                OutlinedTextField(
+                    value = weightInput,
+                    onValueChange = { weightInput = it },
+                    placeholder = { AppText("kg", fontSize = 12.sp) },
+                    textStyle = compactField,
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                    modifier = Modifier.weight(1f),
+                    singleLine = true
+                )
+                OutlinedTextField(
+                    value = repsInput,
+                    onValueChange = { repsInput = it },
+                    placeholder = { AppText("opak.", fontSize = 12.sp) },
+                    textStyle = compactField,
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                    modifier = Modifier.weight(1f),
+                    singleLine = true
+                )
                 Button(
                     onClick = {
-                        val w = weightInput.toFloatOrNull() ?: 0f
+                        val w = weightInput.replace(',', '.').toFloatOrNull() ?: 0f
                         val r = repsInput.toIntOrNull() ?: 0
                         if (r > 0 || w > 0f) {
                             isSaving = true
@@ -1744,9 +2236,11 @@ private fun ActiveExerciseCard(
                         }
                     },
                     enabled = !isSaving,
+                    contentPadding = ButtonDefaults.ContentPadding,
+                    modifier = Modifier.height(40.dp),
                     colors = ButtonDefaults.buttonColors(containerColor = TrainerAppYellow, contentColor = TrainerAppNavy)
                 ) {
-                    AppText("➕ Série", fontWeight = FontWeight.Bold)
+                    AppText(if (isSaving) "…" else "Přidat", fontWeight = FontWeight.Bold, fontSize = 13.sp)
                 }
             }
         }
@@ -1769,6 +2263,7 @@ private fun CompleteTrainingDialog(
     var isSubmitting by remember { mutableStateOf(false) }
 
     AlertDialog(
+        modifier = Modifier.imePadding(),
         onDismissRequest = onDismiss,
         title = { AppText("Ukončit a uložit trénink", color = TrainerAppNavy, fontWeight = FontWeight.Bold) },
         text = {
@@ -1819,7 +2314,7 @@ private fun TrainingSetCard(set: WorkoutSetItem, onClick: () -> Unit = {}) {
 
     Card(
         modifier = Modifier.fillMaxWidth().padding(bottom = 10.dp).clickable { onClick() },
-        colors = CardDefaults.cardColors(containerColor = Color.White),
+        colors = CardDefaults.cardColors(containerColor = MetalCard),
         shape = RoundedCornerShape(16.dp)
     ) {
         Column(Modifier.padding(16.dp)) {
@@ -1849,159 +2344,295 @@ private fun TrainingSetCard(set: WorkoutSetItem, onClick: () -> Unit = {}) {
     }
 }
 
-private fun fetchUserDataFromApi(context: Context, token: String, onSuccess: (String) -> Unit, onError: (String) -> Unit) {
-    if (token.isBlank()) return
-    val baseUrl = getApiBaseUrl(context)
+private data class HttpResult(val code: Int, val body: String)
+
+private fun HttpResult.jsonOrNull(): JSONObject? {
+    if (body.isBlank()) return null
+    return try {
+        JSONObject(body)
+    } catch (_: Exception) {
+        null
+    }
+}
+
+private fun apiErrorText(result: HttpResult, fallback: String): String {
+    val error = result.jsonOrNull()?.optString("error", "").orEmpty()
+    if (error.isNotBlank()) return error
+    return if (result.code > 0) "$fallback (HTTP ${result.code})" else fallback
+}
+
+private fun friendlyNetworkError(e: Exception): String = when {
+    e is UnknownHostException || e.cause is UnknownHostException ->
+        "Nelze se připojit k serveru reservio.online."
+    e is SocketTimeoutException || e.cause is SocketTimeoutException ->
+        "Vypršel časový limit připojení k serveru."
+    else -> "Chyba připojení: ${e.message ?: "neznámá"}"
+}
+
+private fun runInBackground(block: () -> Unit) {
     val executor = Executors.newSingleThreadExecutor()
     executor.execute {
-        var connection: HttpURLConnection? = null
         try {
-            val url = URL("$baseUrl/me.php?token=${URLEncoder.encode(token, "UTF-8")}")
-            connection = url.openConnection() as HttpURLConnection
-            connection.requestMethod = "GET"
-            connection.connectTimeout = 15000
-            connection.readTimeout = 15000
-            connection.setRequestProperty("Accept", "application/json")
+            block()
+        } finally {
+            executor.shutdown()
+        }
+    }
+}
+
+private fun httpRequest(
+    context: Context,
+    path: String,
+    method: String = "GET",
+    token: String = "",
+    jsonBody: JSONObject? = null,
+): HttpResult {
+    val connection = (URL("${resolvedApiBase(context)}/$path").openConnection() as HttpURLConnection)
+    try {
+        connection.requestMethod = method
+        connection.connectTimeout = 15000
+        connection.readTimeout = 15000
+        connection.useCaches = false
+        connection.setRequestProperty("Accept", "application/json")
+        if (token.isNotBlank()) {
             connection.setRequestProperty("Authorization", "Bearer $token")
+        }
+        if (jsonBody != null) {
+            connection.doOutput = true
+            connection.setRequestProperty("Content-Type", "application/json; charset=UTF-8")
+            OutputStreamWriter(connection.outputStream, StandardCharsets.UTF_8).use {
+                it.write(jsonBody.toString())
+                it.flush()
+            }
+        }
+        val code = connection.responseCode
+        val stream = if (code in 200..299) connection.inputStream else connection.errorStream
+        val body = if (stream != null) {
+            BufferedReader(InputStreamReader(stream, StandardCharsets.UTF_8)).use { it.readText() }
+        } else {
+            ""
+        }
+        return HttpResult(code, body)
+    } finally {
+        connection.disconnect()
+    }
+}
 
-            val responseCode = connection.responseCode
-            val inputStream = if (responseCode in 200..299) connection.inputStream else connection.errorStream
-            val response = BufferedReader(InputStreamReader(connection.inputStream, StandardCharsets.UTF_8)).use { it.readText() }
+private fun tokenQuery(token: String): String = URLEncoder.encode(token, "UTF-8")
 
-            if (response.isBlank()) { runOnMain { onSuccess("") }; return@execute }
-            val json = JSONObject(response)
+private fun fetchUserDataFromApi(context: Context, token: String, onSuccess: (String) -> Unit, onError: (String) -> Unit) {
+    if (token.isBlank()) return
+    runInBackground {
+        try {
+            val result = httpRequest(context, "me.php?token=${tokenQuery(token)}", token = token)
+            val json = result.jsonOrNull()
+            if (result.code !in 200..299 || json == null) {
+                runOnMain { onError(apiErrorText(result, "Nepodařilo se načíst profil.")) }
+                return@runInBackground
+            }
             val coachObj = json.optJSONObject("coach") ?: json.optJSONObject("user")
             val name = coachObj?.optString("name", "") ?: json.optString("name", "")
             runOnMain { onSuccess(name) }
         } catch (e: Exception) {
-            runOnMain { onError("Chyba: ${e.message}") }
-        } finally {
-            connection?.disconnect()
-            executor.shutdown()
+            runOnMain { onError(friendlyNetworkError(e)) }
         }
     }
 }
 
 private fun fetchAthletesFromApi(context: Context, token: String, onSuccess: (List<AthleteItem>) -> Unit, onError: (String) -> Unit) {
     if (token.isBlank()) return
-    val baseUrl = getApiBaseUrl(context)
-    val executor = Executors.newSingleThreadExecutor()
-    executor.execute {
-        var connection: HttpURLConnection? = null
+    runInBackground {
         try {
-            val url = URL("$baseUrl/athletes.php?token=${URLEncoder.encode(token, "UTF-8")}")
-            connection = url.openConnection() as HttpURLConnection
-            connection.requestMethod = "GET"
-            connection.connectTimeout = 15000
-            connection.readTimeout = 15000
-            connection.setRequestProperty("Accept", "application/json")
-            connection.setRequestProperty("Authorization", "Bearer $token")
-            connection.setRequestProperty("X-Token", token)
-
-            val responseCode = connection.responseCode
-            val inputStream = if (responseCode in 200..299) connection.inputStream else connection.errorStream
-            val response = BufferedReader(InputStreamReader(connection.inputStream, StandardCharsets.UTF_8)).use { it.readText() }
-
-            if (response.isBlank()) { runOnMain { onSuccess(emptyList()) }; return@execute }
-            val json = JSONObject(response)
-            val list = parseAthletesFromJson(json)
-            runOnMain { onSuccess(list) }
+            val result = httpRequest(context, "athletes.php?token=${tokenQuery(token)}", token = token)
+            val json = result.jsonOrNull()
+            if (result.code !in 200..299 || json == null) {
+                runOnMain { onError(apiErrorText(result, "Chyba při načítání sportovců.")) }
+                return@runInBackground
+            }
+            if (json.has("success") && !json.optBoolean("success", false)) {
+                runOnMain { onError(json.optString("error", "Chyba při načítání sportovců.")) }
+                return@runInBackground
+            }
+            runOnMain { onSuccess(parseAthletesFromJson(json)) }
         } catch (e: Exception) {
-            runOnMain { onError("Chyba při načítání sportovců: ${e.message}") }
-        } finally {
-            connection?.disconnect()
-            executor.shutdown()
+            runOnMain { onError(friendlyNetworkError(e)) }
         }
     }
 }
 
 private fun fetchAthleteFullDetailApi(context: Context, token: String, athleteId: String, onSuccess: (AthleteFullDetail) -> Unit, onError: (String) -> Unit) {
     if (token.isBlank()) return
-    val baseUrl = getApiBaseUrl(context)
-    val executor = Executors.newSingleThreadExecutor()
-    executor.execute {
-        var connection: HttpURLConnection? = null
+    runInBackground {
         try {
-            val url = URL("$baseUrl/athlete.php?id=$athleteId&token=${URLEncoder.encode(token, "UTF-8")}")
-            connection = url.openConnection() as HttpURLConnection
-            connection.requestMethod = "GET"
-            connection.connectTimeout = 12000
-            connection.readTimeout = 12000
-            connection.setRequestProperty("Accept", "application/json")
-            connection.setRequestProperty("Authorization", "Bearer $token")
+            val result = httpRequest(context, "athlete.php?id=$athleteId&token=${tokenQuery(token)}", token = token)
+            val json = result.jsonOrNull()
+            if (result.code !in 200..299 || json == null) {
+                runOnMain { onError(apiErrorText(result, "Detail sportovce se nepodařilo načíst.")) }
+                return@runInBackground
+            }
+            val athObj = json.optJSONObject("athlete")
+            val name = athObj?.optString("full_name", "")?.takeIf { it.isNotBlank() }
+                ?: ((athObj?.optString("first_name", "") ?: "") + " " + (athObj?.optString("last_name", "") ?: "")).trim()
+            val email = athObj?.optString("email", "") ?: ""
+            val phone = athObj?.optString("phone", athObj?.optString("phone_contact", "") ?: "") ?: ""
+            val birthDate = athObj?.optString("birth_date", "") ?: ""
+            val age = if (athObj?.has("age") == true && !athObj.isNull("age")) athObj.optInt("age") else null
+            val photoUrl = athObj?.optString("photo", athObj.optString("photo_url", athObj.optString("avatar", ""))) ?: ""
 
-            val responseCode = connection.responseCode
-            if (responseCode in 200..299) {
-                val response = BufferedReader(InputStreamReader(connection.inputStream, StandardCharsets.UTF_8)).use { it.readText() }
-                if (response.isNotBlank()) {
-                    val json = JSONObject(response)
-                    val athObj = json.optJSONObject("athlete")
-                    val name = athObj?.optString("full_name", "")?.takeIf { it.isNotBlank() }
-                        ?: ((athObj?.optString("first_name", "") ?: "") + " " + (athObj?.optString("last_name", "") ?: "")).trim()
-                    val email = athObj?.optString("email", "") ?: ""
-                    val phone = athObj?.optString("phone", athObj?.optString("phone_contact", "") ?: "") ?: ""
-                    val birthDate = athObj?.optString("birth_date", "") ?: ""
-                    val age = if (athObj?.has("age") == true && !athObj.isNull("age")) athObj.optInt("age") else null
-                    val photoUrl = athObj?.optString("photo", athObj.optString("photo_url", athObj.optString("avatar", ""))) ?: ""
-
-                    val trainArr = json.optJSONArray("trainings")
-                    val trainings = mutableListOf<TrainingItem>()
-                    if (trainArr != null) {
-                        for (i in 0 until trainArr.length()) {
-                            val t = trainArr.optJSONObject(i) ?: continue
-                            trainings.add(
-                                TrainingItem(
-                                    id = t.optString("id", ""),
-                                    time = t.optString("started_at", ""),
-                                    athleteName = name,
-                                    detail = t.optString("set_name", "Trénink")
-                                )
-                            )
-                        }
-                    }
-
-                    val weightArr = json.optJSONArray("weight_logs")
-                    val weightLogs = mutableListOf<WeightLogItem>()
-                    if (weightArr != null) {
-                        for (i in 0 until weightArr.length()) {
-                            val w = weightArr.optJSONObject(i) ?: continue
-                            weightLogs.add(WeightLogItem(w.optInt("id", 0), w.optString("measured_at", ""), w.optDouble("weight_kg", 0.0).toFloat()))
-                        }
-                    }
-
-                    runOnMain { onSuccess(AthleteFullDetail(athleteId, name.trim(), email, phone, birthDate, age, photoUrl, trainings, weightLogs)) }
-                    return@execute
+            val trainArr = json.optJSONArray("trainings")
+            val trainings = mutableListOf<TrainingItem>()
+            if (trainArr != null) {
+                for (i in 0 until trainArr.length()) {
+                    val t = trainArr.optJSONObject(i) ?: continue
+                    trainings.add(
+                        TrainingItem(
+                            id = jsonId(t),
+                            time = t.optString("started_at", ""),
+                            athleteName = name,
+                            detail = t.optString("set_name", "Trénink")
+                        )
+                    )
                 }
             }
-        } catch (_: Exception) {} finally {
-            connection?.disconnect()
-            executor.shutdown()
+
+            val weightArr = json.optJSONArray("weight_logs")
+            val weightLogs = mutableListOf<WeightLogItem>()
+            if (weightArr != null) {
+                for (i in 0 until weightArr.length()) {
+                    val w = weightArr.optJSONObject(i) ?: continue
+                    weightLogs.add(WeightLogItem(w.optInt("id", 0), w.optString("measured_at", ""), w.optDouble("weight_kg", 0.0).toFloat()))
+                }
+            }
+
+            runOnMain { onSuccess(AthleteFullDetail(athleteId, name.trim(), email, phone, birthDate, age, photoUrl, trainings, weightLogs)) }
+        } catch (e: Exception) {
+            runOnMain { onError(friendlyNetworkError(e)) }
         }
-        runOnMain { onError("Chyba") }
+    }
+}
+
+private fun createAthleteApi(
+    context: Context,
+    token: String,
+    firstName: String,
+    lastName: String,
+    birthDate: String,
+    phone: String,
+    email: String,
+    onSuccess: () -> Unit,
+    onError: (String) -> Unit
+) {
+    runInBackground {
+        try {
+            val jsonBody = JSONObject().apply {
+                put("action", "create")
+                put("first_name", firstName)
+                put("last_name", lastName)
+                put("birth_date", birthDate)
+                put("phone", phone)
+                put("email", email)
+            }
+            val result = httpRequest(context, "athletes.php?action=create&token=${tokenQuery(token)}", "POST", token, jsonBody)
+            val json = result.jsonOrNull()
+            if (result.code in 200..299 && json?.optBoolean("success", false) == true) {
+                runOnMain { onSuccess() }
+            } else {
+                runOnMain { onError(apiErrorText(result, "Sportovce se nepodařilo uložit.")) }
+            }
+        } catch (e: Exception) {
+            runOnMain { onError(friendlyNetworkError(e)) }
+        }
+    }
+}
+
+@Composable
+private fun AddAthleteDialog(
+    token: String,
+    context: Context,
+    onDismiss: () -> Unit,
+    onCreated: () -> Unit
+) {
+    var firstName by remember { mutableStateOf("") }
+    var lastName by remember { mutableStateOf("") }
+    var birthDate by remember { mutableStateOf("") }
+    var phone by remember { mutableStateOf("") }
+    var email by remember { mutableStateOf("") }
+    var showDatePicker by remember { mutableStateOf(false) }
+    var isSaving by remember { mutableStateOf(false) }
+    var errorMsg by remember { mutableStateOf("") }
+
+    AlertDialog(
+        modifier = Modifier.imePadding(),
+        onDismissRequest = onDismiss,
+        title = { AppText("Nový sportovec", color = TrainerAppNavy, fontWeight = FontWeight.Bold) },
+        text = {
+            Column(modifier = Modifier.fillMaxWidth().verticalScroll(rememberScrollState())) {
+                OutlinedTextField(value = firstName, onValueChange = { firstName = it }, label = { AppText("Jméno") }, modifier = Modifier.fillMaxWidth(), singleLine = true)
+                Spacer(Modifier.height(8.dp))
+                OutlinedTextField(value = lastName, onValueChange = { lastName = it }, label = { AppText("Příjmení") }, modifier = Modifier.fillMaxWidth(), singleLine = true)
+                Spacer(Modifier.height(8.dp))
+                Card(modifier = Modifier.fillMaxWidth().clickable { showDatePicker = true }, colors = CardDefaults.cardColors(containerColor = TrainerAppLight)) {
+                    Column(Modifier.padding(12.dp)) {
+                        AppText("Datum narození", fontSize = 12.sp, color = TrainerAppGray)
+                        AppText(if (birthDate.isBlank()) "Vybrat" else formatTrainingDate(birthDate), fontWeight = FontWeight.Bold, color = TrainerAppNavy)
+                    }
+                }
+                Spacer(Modifier.height(8.dp))
+                OutlinedTextField(value = phone, onValueChange = { phone = it }, label = { AppText("Telefon") }, modifier = Modifier.fillMaxWidth(), singleLine = true, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Phone))
+                Spacer(Modifier.height(8.dp))
+                OutlinedTextField(value = email, onValueChange = { email = it }, label = { AppText("E-mail") }, modifier = Modifier.fillMaxWidth(), singleLine = true, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Email))
+                if (errorMsg.isNotBlank()) {
+                    Spacer(Modifier.height(8.dp))
+                    AppText(errorMsg, color = Color(0xFFB00020), fontSize = 13.sp)
+                }
+            }
+        },
+        confirmButton = {
+            Button(
+                onClick = {
+                    if (firstName.isBlank() || lastName.isBlank() || birthDate.isBlank()) {
+                        errorMsg = "Vyplňte jméno, příjmení a datum narození."
+                        return@Button
+                    }
+                    isSaving = true
+                    errorMsg = ""
+                    createAthleteApi(context, token, firstName.trim(), lastName.trim(), birthDate, phone.trim(), email.trim(),
+                        onSuccess = { isSaving = false; onCreated() },
+                        onError = { message -> isSaving = false; errorMsg = message }
+                    )
+                },
+                enabled = !isSaving,
+                colors = ButtonDefaults.buttonColors(containerColor = TrainerAppYellow, contentColor = TrainerAppNavy)
+            ) { AppText(if (isSaving) "Ukládám…" else "Uložit", fontWeight = FontWeight.Bold) }
+        },
+        dismissButton = { TextButton(onClick = onDismiss) { AppText("Zrušit") } }
+    )
+
+    if (showDatePicker) {
+        val pickerState = rememberDatePickerState(initialSelectedDateMillis = dateStringToUtcMillis(birthDate.ifBlank { "2000-01-01" }))
+        DatePickerDialog(
+            onDismissRequest = { showDatePicker = false },
+            confirmButton = {
+                TextButton(onClick = {
+                    pickerState.selectedDateMillis?.let { birthDate = utcMillisToDateString(it) }
+                    showDatePicker = false
+                }) { AppText("Vybrat", fontWeight = FontWeight.Bold) }
+            },
+            dismissButton = { TextButton(onClick = { showDatePicker = false }) { AppText("Zrušit") } }
+        ) { DatePicker(state = pickerState) }
     }
 }
 
 private fun fetchWorkoutSetsFromApi(context: Context, token: String, onSuccess: (List<WorkoutSetItem>) -> Unit, onError: (String) -> Unit) {
     if (token.isBlank()) return
-    val baseUrl = getApiBaseUrl(context)
-    val executor = Executors.newSingleThreadExecutor()
-    executor.execute {
-        var connection: HttpURLConnection? = null
+    runInBackground {
         try {
-            val url = URL("$baseUrl/workout_sets.php?token=${URLEncoder.encode(token, "UTF-8")}")
-            connection = url.openConnection() as HttpURLConnection
-            connection.requestMethod = "GET"
-            connection.connectTimeout = 15000
-            connection.readTimeout = 15000
-            connection.setRequestProperty("Accept", "application/json")
-            connection.setRequestProperty("Authorization", "Bearer $token")
-
-            val responseCode = connection.responseCode
-            val inputStream = if (responseCode in 200..299) connection.inputStream else connection.errorStream
-            val response = BufferedReader(InputStreamReader(connection.inputStream, StandardCharsets.UTF_8)).use { it.readText() }
-
-            if (response.isBlank()) { runOnMain { onSuccess(emptyList()) }; return@execute }
-            val json = JSONObject(response)
+            val result = httpRequest(context, "workout_sets.php?token=${tokenQuery(token)}", token = token)
+            val json = result.jsonOrNull()
+            if (result.code !in 200..299 || json == null) {
+                runOnMain { onError(apiErrorText(result, "Tréninkové sady se nepodařilo načíst.")) }
+                return@runInBackground
+            }
             val array = json.optJSONArray("workout_sets")
             val sets = mutableListOf<WorkoutSetItem>()
             if (array != null) {
@@ -2013,119 +2644,217 @@ private fun fetchWorkoutSetsFromApi(context: Context, token: String, onSuccess: 
             }
             runOnMain { onSuccess(sets) }
         } catch (e: Exception) {
-            runOnMain { onError("Chyba: ${e.message}") }
-        } finally {
-            connection?.disconnect()
-            executor.shutdown()
+            runOnMain { onError(friendlyNetworkError(e)) }
         }
     }
 }
 
-private fun fetchVenuesFromApi(context: Context, token: String, onSuccess: (List<VenueItem>) -> Unit) {
+private fun fetchVenuesFromApi(context: Context, token: String, onSuccess: (List<VenueItem>) -> Unit, onError: (String) -> Unit = {}) {
     if (token.isBlank()) return
-    val baseUrl = getApiBaseUrl(context)
-    val executor = Executors.newSingleThreadExecutor()
-    executor.execute {
-        var connection: HttpURLConnection? = null
+    runInBackground {
         try {
-            val url = URL("$baseUrl/venues.php?token=${URLEncoder.encode(token, "UTF-8")}")
-            connection = url.openConnection() as HttpURLConnection
-            connection.requestMethod = "GET"
-            connection.connectTimeout = 10000
-            connection.readTimeout = 10000
-            connection.setRequestProperty("Accept", "application/json")
-            connection.setRequestProperty("Authorization", "Bearer $token")
-
-            val responseCode = connection.responseCode
-            if (responseCode in 200..299) {
-                val response = BufferedReader(InputStreamReader(connection.inputStream, StandardCharsets.UTF_8)).use { it.readText() }
-                if (response.isNotBlank()) {
-                    val json = JSONObject(response)
-                    val array = json.optJSONArray("venues")
-                    val items = mutableListOf<VenueItem>()
-                    if (array != null) {
-                        for (i in 0 until array.length()) {
-                            val obj = array.optJSONObject(i) ?: continue
-                            items.add(VenueItem(obj.optInt("id", 0), obj.optString("name", "Sportoviště"), obj.optString("address", "")))
-                        }
-                    }
-                    runOnMain { onSuccess(items) }
-                    return@execute
+            val result = httpRequest(context, "venues.php?token=${tokenQuery(token)}", token = token)
+            val json = result.jsonOrNull()
+            if (result.code !in 200..299 || json == null) {
+                runOnMain { onError(apiErrorText(result, "Sportoviště se nepodařilo načíst.")) }
+                return@runInBackground
+            }
+            val array = json.optJSONArray("venues")
+            val items = mutableListOf<VenueItem>()
+            if (array != null) {
+                for (i in 0 until array.length()) {
+                    val obj = array.optJSONObject(i) ?: continue
+                    items.add(VenueItem(obj.optInt("id", 0), obj.optString("name", "Sportoviště"), obj.optString("address", "")))
                 }
             }
-        } catch (_: Exception) {} finally { connection?.disconnect(); executor.shutdown() }
-        runOnMain { onSuccess(emptyList()) }
+            runOnMain { onSuccess(items) }
+        } catch (e: Exception) {
+            runOnMain { onError(friendlyNetworkError(e)) }
+        }
     }
 }
 
-private fun fetchCalendarFromApi(context: Context, token: String, onSuccess: (List<TrainingItem>) -> Unit) {
+private data class EventColors(val background: Color, val text: Color)
+
+private fun webPalette(key: String): EventColors = when (key) {
+    "blue" -> EventColors(Color(0xFF0EA5E9), Color.White)
+    "green" -> EventColors(Color(0xFF22C55E), Color.White)
+    "red" -> EventColors(Color(0xFFEF4444), Color.White)
+    "orange" -> EventColors(Color(0xFFF97316), Color.White)
+    "teal" -> EventColors(Color(0xFF14B8A6), Color.White)
+    "yellow" -> EventColors(Color(0xFFFACC15), Color(0xFF111827))
+    "purple" -> EventColors(Color(0xFF8B5CF6), Color.White)
+    "gray" -> EventColors(Color(0xFF6B7280), Color.White)
+    else -> EventColors(Color(0xFF22C55E), Color.White)
+}
+
+private fun webEventColors(ev: TrainingItem): EventColors {
+    if (ev.isLocked) return EventColors(Color(0xFFD6D3CC), TrainerAppNavy)
+    if (ev.approvalStatus.equals("pending", ignoreCase = true)) return webPalette("orange")
+    if (ev.athleteId > 0 && ev.secondAthleteId > 0) return webPalette("blue")
+    if (ev.athleteId > 0) return webPalette("green")
+    return webPalette(ev.colorKey)
+}
+
+private fun isRescheduleRequest(seriesId: String): Boolean =
+    Regex("^reschedule:\\d+$").matches(seriesId.trim())
+
+private fun markRescheduleOrigins(items: List<TrainingItem>): List<TrainingItem> {
+    val originIds = items.mapNotNull { ev ->
+        if (!ev.approvalStatus.equals("pending", ignoreCase = true)) return@mapNotNull null
+        Regex("^reschedule:(\\d+)$").matchEntire(ev.seriesId.trim())?.groupValues?.getOrNull(1)
+    }.toSet()
+    if (originIds.isEmpty()) return items
+    return items.map { ev ->
+        if (!ev.isLocked && originIds.contains(ev.id) && !ev.approvalStatus.equals("pending", ignoreCase = true)) {
+            ev.copy(awaitingReschedule = true)
+        } else {
+            ev
+        }
+    }
+}
+
+@Composable
+private fun CalendarSlotEvent(ev: TrainingItem, onClick: () -> Unit) {
+    val pending = !ev.isLocked && ev.approvalStatus.equals("pending", ignoreCase = true)
+    val origin = ev.awaitingReschedule
+    if (pending || origin) {
+        PulsingCalendarSlotEvent(ev, pending, onClick)
+    } else {
+        StaticCalendarSlotEvent(ev, onClick)
+    }
+}
+
+@Composable
+private fun PulsingCalendarSlotEvent(ev: TrainingItem, pending: Boolean, onClick: () -> Unit) {
+    val colors = webEventColors(ev)
+    val transition = rememberInfiniteTransition(label = "eventPulse")
+    val pulse by transition.animateFloat(
+        initialValue = 0f,
+        targetValue = 1f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(durationMillis = if (pending) 720 else 950),
+            repeatMode = RepeatMode.Reverse
+        ),
+        label = "eventPulseValue"
+    )
+    val borderColor = if (pending) {
+        Color(0xFFFFF7ED)
+    } else {
+        Color(0xFFFB923C).copy(alpha = 0.55f + 0.45f * pulse)
+    }
+    CalendarSlotEventCard(
+        ev = ev,
+        colors = colors,
+        borderColor = borderColor,
+        borderWidth = if (pending) 2.dp else 3.dp,
+        scale = 1f + (if (pending) 0.03f else 0.025f) * pulse,
+        statusLabel = if (pending) {
+            if (isRescheduleRequest(ev.seriesId)) "Žádost o změnu" else "Ke schválení"
+        } else {
+            "Čeká na změnu"
+        },
+        onClick = onClick
+    )
+}
+
+@Composable
+private fun StaticCalendarSlotEvent(ev: TrainingItem, onClick: () -> Unit) {
+    CalendarSlotEventCard(
+        ev = ev,
+        colors = webEventColors(ev),
+        borderColor = Color.Transparent,
+        borderWidth = 0.dp,
+        scale = 1f,
+        statusLabel = "",
+        onClick = onClick
+    )
+}
+
+@Composable
+private fun CalendarSlotEventCard(
+    ev: TrainingItem,
+    colors: EventColors,
+    borderColor: Color,
+    borderWidth: androidx.compose.ui.unit.Dp,
+    scale: Float,
+    statusLabel: String,
+    onClick: () -> Unit
+) {
+    Card(
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(2.dp)
+            .graphicsLayer {
+                scaleX = scale
+                scaleY = scale
+            }
+            .then(
+                if (borderWidth > 0.dp) Modifier.border(borderWidth, borderColor, RoundedCornerShape(8.dp))
+                else Modifier
+            )
+            .clickable(onClick = onClick),
+        colors = CardDefaults.cardColors(containerColor = colors.background),
+        shape = RoundedCornerShape(8.dp)
+    ) {
+        Column(Modifier.padding(6.dp)) {
+            AppText(
+                text = if (ev.isLocked) "🔒 ${ev.detail}" else "${ev.time} - ${ev.athleteName}",
+                fontSize = 12.sp,
+                fontWeight = FontWeight.Bold,
+                color = colors.text
+            )
+            if (!ev.isLocked && ev.detail.isNotBlank()) {
+                AppText(ev.detail, fontSize = 10.sp, color = colors.text.copy(alpha = 0.9f))
+            }
+            if (statusLabel.isNotBlank()) {
+                AppText(statusLabel, fontSize = 10.sp, fontWeight = FontWeight.Bold, color = colors.text)
+            }
+        }
+    }
+}
+
+private fun fetchCalendarFromApi(context: Context, token: String, onSuccess: (List<TrainingItem>) -> Unit, onError: (String) -> Unit = {}) {
     if (token.isBlank()) { onSuccess(emptyList()); return }
-    val baseUrl = getApiBaseUrl(context)
-    val executor = Executors.newSingleThreadExecutor()
-    executor.execute {
-        var connection: HttpURLConnection? = null
+    runInBackground {
         try {
-            val url = URL("$baseUrl/calendar.php?token=${URLEncoder.encode(token, "UTF-8")}")
-            connection = url.openConnection() as HttpURLConnection
-            connection.requestMethod = "GET"
-            connection.connectTimeout = 12000
-            connection.readTimeout = 12000
-            connection.setRequestProperty("Accept", "application/json")
-            connection.setRequestProperty("Authorization", "Bearer $token")
-
-            val responseCode = connection.responseCode
-            if (responseCode in 200..299) {
-                val response = BufferedReader(InputStreamReader(connection.inputStream, StandardCharsets.UTF_8)).use { it.readText() }
-                if (response.isNotBlank()) {
-                    val json = JSONObject(response)
-                    val array = json.optJSONArray("events") ?: json.optJSONArray("items")
-                    val items = mutableListOf<TrainingItem>()
-                    if (array != null) {
-                        for (i in 0 until array.length()) {
-                            val obj = array.optJSONObject(i) ?: continue
-                            val id = obj.optString("id", i.toString())
-                            val title = obj.optString("title", "Trénink")
-                            val athleteName = obj.optString("athlete_name", obj.optString("athlete_label", "Sportovec"))
-                            val timeLabel = obj.optString("time_label", "09:00")
-                            val dateLabel = obj.optString("date_label", "")
-                            val status = obj.optString("status", obj.optString("status_label", "Potvrzeno"))
-                            val approvalStatus = obj.optString("approval_status", "approved")
-                            val isLocked = obj.optBoolean("is_locked", false)
-                            val location = obj.optString("location", "")
-                            val startHour = obj.optInt("start_hour", 9)
-                            val endHour = obj.optInt("end_hour", startHour + 1)
-                            val detailStr = if (location.isNotBlank()) "$title • $location" else title
-
-                            items.add(TrainingItem(id, timeLabel, dateLabel, athleteName, detailStr, status, approvalStatus, isLocked, startHour, endHour))
-                        }
-                    }
-                    runOnMain { onSuccess(items) }
-                    return@execute
+            val result = httpRequest(context, "calendar.php?token=${tokenQuery(token)}", token = token)
+            val json = result.jsonOrNull()
+            if (result.code !in 200..299 || json == null) {
+                runOnMain { onError(apiErrorText(result, "Kalendář se nepodařilo načíst.")) }
+                return@runInBackground
+            }
+            val array = json.optJSONArray("events") ?: json.optJSONArray("items")
+            val items = mutableListOf<TrainingItem>()
+            if (array != null) {
+                for (i in 0 until array.length()) {
+                    val obj = array.optJSONObject(i) ?: continue
+                    val id = jsonId(obj).ifBlank { i.toString() }
+                    val title = obj.optString("title", "Trénink")
+                    val athleteName = obj.optString("athlete_name", obj.optString("athlete_label", "Sportovec"))
+                    val timeLabel = obj.optString("time_label", "09:00")
+                    val dateLabel = obj.optString("date_label", "")
+                    val status = obj.optString("status", obj.optString("status_label", "Potvrzeno"))
+                    val approvalStatus = obj.optString("approval_status", "approved")
+                    val isLocked = obj.optBoolean("is_locked", false)
+                    val location = obj.optString("location", "")
+                    val startHour = obj.optInt("start_hour", 9)
+                    val endHour = obj.optInt("end_hour", startHour + 1)
+                    val athleteId = obj.optInt("athlete_id", 0)
+                    val detailStr = if (location.isNotBlank()) "$title • $location" else title
+                    items.add(TrainingItem(id, timeLabel, dateLabel, athleteName, detailStr, status, approvalStatus, isLocked, startHour, endHour, athleteId, title, location, obj.optString("starts_at", ""), obj.optString("ends_at", ""), obj.optString("color_key", "green"), obj.optInt("second_athlete_id", 0), obj.optString("series_id", "")))
                 }
             }
-        } catch (_: Exception) {} finally {
-            connection?.disconnect()
-            executor.shutdown()
+            runOnMain { onSuccess(markRescheduleOrigins(items)) }
+        } catch (e: Exception) {
+            runOnMain { onError(friendlyNetworkError(e)) }
         }
-        runOnMain { onSuccess(emptyList()) }
     }
 }
 
 private fun createCalendarEventApi(context: Context, token: String, athleteId: Int?, title: String, location: String, startsAt: String, endsAt: String, onSuccess: () -> Unit, onError: (String) -> Unit) {
-    val baseUrl = getApiBaseUrl(context)
-    val executor = Executors.newSingleThreadExecutor()
-    executor.execute {
-        var connection: HttpURLConnection? = null
+    runInBackground {
         try {
-            val url = URL("$baseUrl/calendar.php?action=create&token=${URLEncoder.encode(token, "UTF-8")}")
-            connection = url.openConnection() as HttpURLConnection
-            connection.requestMethod = "POST"
-            connection.connectTimeout = 12000
-            connection.readTimeout = 12000
-            connection.doOutput = true
-            connection.setRequestProperty("Content-Type", "application/json; charset=UTF-8")
-            connection.setRequestProperty("Authorization", "Bearer $token")
-
             val jsonBody = JSONObject().apply {
                 if (athleteId != null && athleteId > 0) put("athlete_id", athleteId)
                 put("title", title)
@@ -2133,500 +2862,437 @@ private fun createCalendarEventApi(context: Context, token: String, athleteId: I
                 put("starts_at", startsAt)
                 put("ends_at", endsAt)
             }
+            val result = httpRequest(context, "calendar.php?action=create&token=${tokenQuery(token)}", "POST", token, jsonBody)
+            val json = result.jsonOrNull()
+            if (result.code in 200..299 && json?.optBoolean("success", false) == true) {
+                runOnMain { onSuccess() }
+            } else {
+                runOnMain { onError(apiErrorText(result, "Chyba vytvoření události.")) }
+            }
+        } catch (e: Exception) {
+            runOnMain { onError(friendlyNetworkError(e)) }
+        }
+    }
+}
 
-            OutputStreamWriter(connection.outputStream, StandardCharsets.UTF_8).use { it.write(jsonBody.toString()); it.flush() }
-            val responseCode = connection.responseCode
-            val inputStream = if (responseCode in 200..299) connection.inputStream else connection.errorStream
-            val response = BufferedReader(InputStreamReader(connection.inputStream, StandardCharsets.UTF_8)).use { it.readText() }
+private fun lockCalendarApi(context: Context, token: String, note: String, startsAt: String, endsAt: String, onSuccess: () -> Unit, onError: (String) -> Unit) {
+    runInBackground {
+        try {
+            val jsonBody = JSONObject().apply {
+                put("note", note)
+                put("starts_at", startsAt)
+                put("ends_at", endsAt)
+            }
+            val result = httpRequest(context, "calendar.php?action=lock&token=${tokenQuery(token)}", "POST", token, jsonBody)
+            val json = result.jsonOrNull()
+            if (result.code in 200..299 && json?.optBoolean("success", false) == true) {
+                runOnMain { onSuccess() }
+            } else {
+                runOnMain { onError(apiErrorText(result, "Chyba uzamčení.")) }
+            }
+        } catch (e: Exception) {
+            runOnMain { onError(friendlyNetworkError(e)) }
+        }
+    }
+}
 
-            if (response.isNotBlank()) {
-                val json = JSONObject(response)
-                if (json.optBoolean("success", false)) {
-                    runOnMain { onSuccess() }
-                    return@execute
-                } else {
-                    val err = json.optString("error", "Chyba vytvoření události.")
-                    runOnMain { onError(err) }
-                    return@execute
+private fun approveCalendarEventApi(
+    context: Context,
+    token: String,
+    eventId: Int,
+    startsAt: String = "",
+    endsAt: String = "",
+    title: String? = null,
+    location: String? = null,
+    athleteId: Int? = null,
+    onSuccess: () -> Unit,
+    onError: (String) -> Unit
+) {
+    runInBackground {
+        try {
+            val jsonBody = JSONObject().apply {
+                put("event_id", eventId)
+                if (startsAt.isNotBlank()) put("starts_at", startsAt)
+                if (endsAt.isNotBlank()) put("ends_at", endsAt)
+                if (title != null) put("title", title)
+                if (location != null) put("location", location)
+                if (athleteId != null) put("athlete_id", athleteId)
+            }
+            val result = httpRequest(context, "calendar.php?action=approve&token=${tokenQuery(token)}", "POST", token, jsonBody)
+            val json = result.jsonOrNull()
+            if (result.code in 200..299 && json?.optBoolean("success", false) == true) runOnMain { onSuccess() }
+            else runOnMain { onError(apiErrorText(result, "Schválení se nepodařilo.")) }
+        } catch (e: Exception) {
+            runOnMain { onError(friendlyNetworkError(e)) }
+        }
+    }
+}
+
+private fun deleteCalendarEventApi(context: Context, token: String, eventId: Int, startsAt: String = "", endsAt: String = "", reject: Boolean = false, onSuccess: () -> Unit, onError: (String) -> Unit) {
+    runInBackground {
+        try {
+            val actionName = when {
+                reject -> "reject"
+                eventId >= 200000 && startsAt.isNotBlank() -> "unlock"
+                else -> "delete"
+            }
+            val query = buildString {
+                append("calendar.php?action=$actionName&event_id=$eventId&token=${tokenQuery(token)}")
+                if (startsAt.isNotBlank() && endsAt.isNotBlank()) {
+                    append("&starts_at=${URLEncoder.encode(startsAt, "UTF-8")}")
+                    append("&ends_at=${URLEncoder.encode(endsAt, "UTF-8")}")
                 }
             }
-            runOnMain { onError("Chyba vytvoření události") }
-        } catch (e: Exception) { runOnMain { onError("Chyba: ${e.message}") } }
-        finally { connection?.disconnect(); executor.shutdown() }
-    }
-}
-
-private fun approveCalendarEventApi(context: Context, token: String, eventId: Int, onSuccess: () -> Unit, onError: (String) -> Unit) {
-    val baseUrl = getApiBaseUrl(context)
-    val executor = Executors.newSingleThreadExecutor()
-    executor.execute {
-        var connection: HttpURLConnection? = null
-        try {
-            val url = URL("$baseUrl/calendar.php?action=approve&token=${URLEncoder.encode(token, "UTF-8")}")
-            connection = url.openConnection() as HttpURLConnection
-            connection.requestMethod = "POST"
-            connection.connectTimeout = 10000
-            connection.readTimeout = 10000
-            connection.doOutput = true
-            connection.setRequestProperty("Content-Type", "application/json; charset=UTF-8")
-            connection.setRequestProperty("Authorization", "Bearer $token")
-
-            val jsonBody = JSONObject().apply { put("event_id", eventId) }
-            OutputStreamWriter(connection.outputStream, StandardCharsets.UTF_8).use { it.write(jsonBody.toString()); it.flush() }
-            if (connection.responseCode in 200..299) runOnMain { onSuccess() }
-            else runOnMain { onError("Chyba schválení") }
-        } catch (e: Exception) { runOnMain { onError("Chyba: ${e.message}") } }
-        finally { connection?.disconnect(); executor.shutdown() }
-    }
-}
-
-private fun deleteCalendarEventApi(context: Context, token: String, eventId: Int, startsAt: String = "", endsAt: String = "", onSuccess: () -> Unit, onError: (String) -> Unit) {
-    val baseUrl = getApiBaseUrl(context)
-    val executor = Executors.newSingleThreadExecutor()
-    executor.execute {
-        var connection: HttpURLConnection? = null
-        try {
-            val actionName = if (eventId >= 200000 && startsAt.isNotBlank()) "unlock" else "delete"
-            val url = URL("$baseUrl/calendar.php?action=$actionName&event_id=$eventId&starts_at=${URLEncoder.encode(startsAt, "UTF-8")}&ends_at=${URLEncoder.encode(endsAt, "UTF-8")}&token=${URLEncoder.encode(token, "UTF-8")}")
-            connection = url.openConnection() as HttpURLConnection
-            connection.requestMethod = "POST"
-            connection.connectTimeout = 10000
-            connection.readTimeout = 10000
-            connection.doOutput = true
-            connection.setRequestProperty("Content-Type", "application/json; charset=UTF-8")
-            connection.setRequestProperty("Authorization", "Bearer $token")
-
+            val path = query
             val jsonBody = JSONObject().apply {
                 put("event_id", eventId)
                 if (startsAt.isNotBlank()) put("starts_at", startsAt)
                 if (endsAt.isNotBlank()) put("ends_at", endsAt)
             }
-            OutputStreamWriter(connection.outputStream, StandardCharsets.UTF_8).use { it.write(jsonBody.toString()); it.flush() }
-            val responseCode = connection.responseCode
-            if (responseCode in 200..299) {
-                val response = BufferedReader(InputStreamReader(connection.inputStream, StandardCharsets.UTF_8)).use { it.readText() }
-                if (response.isNotBlank()) {
-                    val json = JSONObject(response)
-                    if (json.optBoolean("success", false)) {
-                        runOnMain { onSuccess() }
-                        return@execute
-                    }
-                }
+            val result = httpRequest(context, path, "POST", token, jsonBody)
+            val json = result.jsonOrNull()
+            if (result.code in 200..299 && json?.optBoolean("success", false) == true) {
+                runOnMain { onSuccess() }
+            } else {
+                runOnMain { onError(apiErrorText(result, "Chyba mazání.")) }
             }
-            runOnMain { onError("Chyba mazání") }
-        } catch (e: Exception) { runOnMain { onError("Chyba: ${e.message}") } }
-        finally { connection?.disconnect(); executor.shutdown() }
+        } catch (e: Exception) {
+            runOnMain { onError(friendlyNetworkError(e)) }
+        }
     }
 }
 
-private fun fetchExercisesApi(context: Context, token: String, onSuccess: (List<ExerciseItem>) -> Unit) {
+private fun fetchExercisesApi(context: Context, token: String, onSuccess: (List<ExerciseItem>) -> Unit, onError: (String) -> Unit = {}) {
     if (token.isBlank()) return
-    val baseUrl = getApiBaseUrl(context)
-    val executor = Executors.newSingleThreadExecutor()
-    executor.execute {
-        var connection: HttpURLConnection? = null
+    runInBackground {
         try {
-            val url = URL("$baseUrl/exercises.php?token=${URLEncoder.encode(token, "UTF-8")}")
-            connection = url.openConnection() as HttpURLConnection
-            connection.requestMethod = "GET"
-            connection.connectTimeout = 12000
-            connection.readTimeout = 12000
-            connection.setRequestProperty("Accept", "application/json")
-            connection.setRequestProperty("Authorization", "Bearer $token")
-
-            val responseCode = connection.responseCode
-            if (responseCode in 200..299) {
-                val response = BufferedReader(InputStreamReader(connection.inputStream, StandardCharsets.UTF_8)).use { it.readText() }
-                if (response.isNotBlank()) {
-                    val json = JSONObject(response)
-                    val array = json.optJSONArray("exercises")
-                    val items = mutableListOf<ExerciseItem>()
-                    if (array != null) {
-                        for (i in 0 until array.length()) {
-                            val obj = array.optJSONObject(i) ?: continue
-                            items.add(
-                                ExerciseItem(
-                                    id = obj.optInt("id", 0),
-                                    name = obj.optString("name", "Cvik"),
-                                    sportType = obj.optString("sport_type", "standard")
-                                )
-                            )
-                        }
-                    }
-                    runOnMain { onSuccess(items) }
-                    return@execute
+            val result = httpRequest(context, "exercises.php?token=${tokenQuery(token)}", token = token)
+            val json = result.jsonOrNull()
+            if (result.code !in 200..299 || json == null) {
+                runOnMain { onError(apiErrorText(result, "Cviky se nepodařilo načíst.")) }
+                return@runInBackground
+            }
+            val array = json.optJSONArray("exercises")
+            val items = mutableListOf<ExerciseItem>()
+            if (array != null) {
+                for (i in 0 until array.length()) {
+                    val obj = array.optJSONObject(i) ?: continue
+                    items.add(
+                        ExerciseItem(
+                            id = obj.optInt("id", 0),
+                            name = obj.optString("name", "Cvik"),
+                            sportType = obj.optString("sport_type", "standard")
+                        )
+                    )
                 }
             }
-        } catch (_: Exception) {} finally { connection?.disconnect(); executor.shutdown() }
-        runOnMain { onSuccess(emptyList()) }
+            runOnMain { onSuccess(items) }
+        } catch (e: Exception) {
+            runOnMain { onError(friendlyNetworkError(e)) }
+        }
     }
 }
 
 private fun addExerciseToSessionApi(context: Context, token: String, sessionId: Int, exerciseId: Int, onSuccess: () -> Unit, onError: (String) -> Unit) {
-    val baseUrl = getApiBaseUrl(context)
-    val executor = Executors.newSingleThreadExecutor()
-    executor.execute {
-        var connection: HttpURLConnection? = null
+    runInBackground {
         try {
-            val url = URL("$baseUrl/training_session.php?action=add_exercise&token=${URLEncoder.encode(token, "UTF-8")}")
-            connection = url.openConnection() as HttpURLConnection
-            connection.requestMethod = "POST"
-            connection.connectTimeout = 10000
-            connection.readTimeout = 10000
-            connection.doOutput = true
-            connection.setRequestProperty("Content-Type", "application/json; charset=UTF-8")
-            connection.setRequestProperty("Authorization", "Bearer $token")
-
             val jsonBody = JSONObject().apply {
                 put("session_id", sessionId)
                 put("exercise_id", exerciseId)
             }
-            OutputStreamWriter(connection.outputStream, StandardCharsets.UTF_8).use { it.write(jsonBody.toString()); it.flush() }
-            if (connection.responseCode in 200..299) runOnMain { onSuccess() }
-            else runOnMain { onError("Chyba přidání cviku") }
-        } catch (e: Exception) { runOnMain { onError("Chyba: ${e.message}") } }
-        finally { connection?.disconnect(); executor.shutdown() }
+            val result = httpRequest(context, "training_session.php?action=add_exercise&token=${tokenQuery(token)}", "POST", token, jsonBody)
+            val json = result.jsonOrNull()
+            val explicitFail = json != null && json.has("success") && !json.optBoolean("success")
+            if (result.code in 200..299 && !explicitFail) runOnMain { onSuccess() }
+            else runOnMain { onError(apiErrorText(result, "Chyba přidání cviku.")) }
+        } catch (e: Exception) {
+            runOnMain { onError(friendlyNetworkError(e)) }
+        }
     }
 }
 
 private fun fetchActiveSessionDetailApi(context: Context, token: String, sessionId: Int, onSuccess: (JSONObject, List<SessionExerciseItem>) -> Unit, onError: (String) -> Unit) {
-    val baseUrl = getApiBaseUrl(context)
-    val executor = Executors.newSingleThreadExecutor()
-    executor.execute {
-        var connection: HttpURLConnection? = null
+    runInBackground {
         try {
-            val url = URL("$baseUrl/training_session.php?id=$sessionId&token=${URLEncoder.encode(token, "UTF-8")}")
-            connection = url.openConnection() as HttpURLConnection
-            connection.requestMethod = "GET"
-            connection.connectTimeout = 12000
-            connection.readTimeout = 12000
-            connection.setRequestProperty("Accept", "application/json")
-            connection.setRequestProperty("Authorization", "Bearer $token")
-
-            val responseCode = connection.responseCode
-            if (responseCode in 200..299) {
-                val response = BufferedReader(InputStreamReader(connection.inputStream, StandardCharsets.UTF_8)).use { it.readText() }
-                if (response.isNotBlank()) {
-                    val json = JSONObject(response)
-                    val sessObj = json.optJSONObject("session") ?: JSONObject()
-                    val exArr = json.optJSONArray("exercises")
-                    val exList = mutableListOf<SessionExerciseItem>()
-                    if (exArr != null) {
-                        for (i in 0 until exArr.length()) {
-                            val item = exArr.optJSONObject(i) ?: continue
-                            val exId = item.optInt("exercise_id", 0)
-                            val order = item.optInt("exercise_order", i + 1)
-                            val name = item.optString("exercise_name", "Cvik")
-                            val sArr = item.optJSONArray("series")
-                            val sList = mutableListOf<SessionSeriesItem>()
-                            if (sArr != null) {
-                                for (j in 0 until sArr.length()) {
-                                    val s = sArr.optJSONObject(j) ?: continue
-                                    sList.add(SessionSeriesItem(s.optInt("id", 0), s.optInt("series_order", j + 1), s.optDouble("weight", 0.0).toFloat(), s.optInt("reps", 0)))
-                                }
-                            }
-                            exList.add(SessionExerciseItem(exId, order, name, "standard", false, sList))
+            val result = httpRequest(context, "training_session.php?id=$sessionId&token=${tokenQuery(token)}", token = token)
+            val json = result.jsonOrNull()
+            if (result.code !in 200..299 || json == null) {
+                runOnMain { onError(apiErrorText(result, "Trénink se nepodařilo načíst.")) }
+                return@runInBackground
+            }
+            val sessObj = json.optJSONObject("session") ?: JSONObject()
+            val exArr = json.optJSONArray("exercises")
+            val exList = mutableListOf<SessionExerciseItem>()
+            if (exArr != null) {
+                for (i in 0 until exArr.length()) {
+                    val item = exArr.optJSONObject(i) ?: continue
+                    val exId = item.optInt("exercise_id", 0)
+                    val order = item.optInt("exercise_order", i + 1)
+                    val name = item.optString("exercise_name", "Cvik")
+                    val sArr = item.optJSONArray("series")
+                    val sList = mutableListOf<SessionSeriesItem>()
+                    if (sArr != null) {
+                        for (j in 0 until sArr.length()) {
+                            val s = sArr.optJSONObject(j) ?: continue
+                            sList.add(SessionSeriesItem(s.optInt("id", 0), s.optInt("series_order", j + 1), s.optDouble("weight", 0.0).toFloat(), s.optInt("reps", 0)))
                         }
                     }
-                    runOnMain { onSuccess(sessObj, exList) }
-                    return@execute
+                    val prevArr = item.optJSONArray("previous_series")
+                    val prevList = mutableListOf<SessionSeriesItem>()
+                    if (prevArr != null) {
+                        for (j in 0 until prevArr.length()) {
+                            val s = prevArr.optJSONObject(j) ?: continue
+                            prevList.add(SessionSeriesItem(s.optInt("id", 0), s.optInt("series_order", j + 1), s.optDouble("weight", 0.0).toFloat(), s.optInt("reps", 0)))
+                        }
+                    }
+                    exList.add(SessionExerciseItem(exId, order, name, item.optString("sport_type", "standard"), item.optBoolean("is_timed", false), sList, prevList, item.optString("previous_label", "")))
                 }
             }
-        } catch (_: Exception) {} finally { connection?.disconnect(); executor.shutdown() }
-        runOnMain { onError("Chyba") }
+            runOnMain { onSuccess(sessObj, exList) }
+        } catch (e: Exception) {
+            runOnMain { onError(friendlyNetworkError(e)) }
+        }
     }
 }
 
 private fun saveSeriesApi(context: Context, token: String, sessionId: Int, exerciseId: Int, weight: Float, reps: Int, onSuccess: () -> Unit, onError: (String) -> Unit) {
-    val baseUrl = getApiBaseUrl(context)
-    val executor = Executors.newSingleThreadExecutor()
-    executor.execute {
-        var connection: HttpURLConnection? = null
+    runInBackground {
         try {
-            val url = URL("$baseUrl/training_session.php?action=save_series&token=${URLEncoder.encode(token, "UTF-8")}")
-            connection = url.openConnection() as HttpURLConnection
-            connection.requestMethod = "POST"
-            connection.connectTimeout = 10000
-            connection.readTimeout = 10000
-            connection.doOutput = true
-            connection.setRequestProperty("Content-Type", "application/json; charset=UTF-8")
-            connection.setRequestProperty("Authorization", "Bearer $token")
-
             val jsonBody = JSONObject().apply {
                 put("session_id", sessionId)
                 put("exercise_id", exerciseId)
                 put("weight", weight)
                 put("reps", reps)
             }
-            OutputStreamWriter(connection.outputStream, StandardCharsets.UTF_8).use { it.write(jsonBody.toString()); it.flush() }
-            if (connection.responseCode in 200..299) runOnMain { onSuccess() }
-            else runOnMain { onError("Chyba uložení série") }
-        } catch (e: Exception) { runOnMain { onError("Chyba: ${e.message}") } }
-        finally { connection?.disconnect(); executor.shutdown() }
+            val result = httpRequest(context, "training_session.php?action=save_series&token=${tokenQuery(token)}", "POST", token, jsonBody)
+            val json = result.jsonOrNull()
+            val explicitFail = json != null && json.has("success") && !json.optBoolean("success")
+            if (result.code in 200..299 && !explicitFail) runOnMain { onSuccess() }
+            else runOnMain { onError(apiErrorText(result, "Chyba uložení série.")) }
+        } catch (e: Exception) {
+            runOnMain { onError(friendlyNetworkError(e)) }
+        }
     }
 }
 
 private fun completeActiveSessionApi(context: Context, token: String, sessionId: Int, location: String, notes: String, onSuccess: () -> Unit, onError: (String) -> Unit) {
-    val baseUrl = getApiBaseUrl(context)
-    val executor = Executors.newSingleThreadExecutor()
-    executor.execute {
-        var connection: HttpURLConnection? = null
-        var inputStream: InputStream? = null
+    runInBackground {
         try {
-            val url = URL("$baseUrl/training_session.php?action=complete&token=${URLEncoder.encode(token, "UTF-8")}")
-            connection = url.openConnection() as HttpURLConnection
-            connection.requestMethod = "POST"
-            connection.connectTimeout = 12000
-            connection.readTimeout = 12000
-            connection.doOutput = true
-            connection.setRequestProperty("Content-Type", "application/json; charset=UTF-8")
-            connection.setRequestProperty("Authorization", "Bearer $token")
-
             val jsonBody = JSONObject().apply {
                 put("session_id", sessionId)
                 put("location", location)
                 put("notes", notes)
             }
-            OutputStreamWriter(connection.outputStream, StandardCharsets.UTF_8).use { it.write(jsonBody.toString()); it.flush() }
-            val responseCode = connection.responseCode
-            inputStream = if (responseCode in 200..299) connection.inputStream else connection.errorStream
-            val response = BufferedReader(InputStreamReader(connection.inputStream, StandardCharsets.UTF_8)).use { it.readText() }
-
-            if (responseCode in 200..299) runOnMain { onSuccess() }
-            else runOnMain { onError("Chyba dokončení: $response") }
-        } catch (e: Exception) { runOnMain { onError("Chyba: ${e.message}") } }
-        finally { 
-            try { inputStream?.close() } catch(_: Exception) {}
-            connection?.disconnect()
-            executor.shutdown() 
+            val result = httpRequest(context, "training_session.php?action=complete&token=${tokenQuery(token)}", "POST", token, jsonBody)
+            val json = result.jsonOrNull()
+            val explicitFail = json != null && json.has("success") && !json.optBoolean("success")
+            if (result.code in 200..299 && !explicitFail) runOnMain { onSuccess() }
+            else runOnMain { onError(apiErrorText(result, "Chyba dokončení.")) }
+        } catch (e: Exception) {
+            runOnMain { onError(friendlyNetworkError(e)) }
         }
     }
 }
 
-private fun fetchChatConversationsFromApi(context: Context, token: String, onSuccess: (List<ChatConversation>) -> Unit) {
+private fun fetchChatConversationsFromApi(context: Context, token: String, onSuccess: (List<ChatConversation>) -> Unit, onError: (String) -> Unit = {}) {
     if (token.isBlank()) return
-    val baseUrl = getApiBaseUrl(context)
-    val executor = Executors.newSingleThreadExecutor()
-    executor.execute {
-        var connection: HttpURLConnection? = null
+    runInBackground {
         try {
-            val url = URL("$baseUrl/chat.php?action=conversations&token=${URLEncoder.encode(token, "UTF-8")}")
-            connection = url.openConnection() as HttpURLConnection
-            connection.requestMethod = "GET"
-            connection.connectTimeout = 12000
-            connection.readTimeout = 12000
-            connection.setRequestProperty("Accept", "application/json")
-            connection.setRequestProperty("Authorization", "Bearer $token")
-
-            val responseCode = connection.responseCode
-            if (responseCode in 200..299) {
-                val response = BufferedReader(InputStreamReader(connection.inputStream, StandardCharsets.UTF_8)).use { it.readText() }
-                if (response.isNotBlank()) {
-                    val json = JSONObject(response)
-                    val array = json.optJSONArray("conversations")
-                    val items = mutableListOf<ChatConversation>()
-                    if (array != null) {
-                        for (i in 0 until array.length()) {
-                            val obj = array.optJSONObject(i) ?: continue
-                            val id = obj.optString("id", "")
-                            val name = obj.optString("name", "")
-                            val subtitle = obj.optString("subtitle", "")
-                            val icon = obj.optString("icon", "👤")
-                            val isAdmin = obj.optBoolean("is_admin", false)
-                            val unreadCount = obj.optInt("unread_count", 0)
-                            val lastMsg = obj.optString("last_message", "")
-                            val lastTime = obj.optString("last_time", "")
-
-                            items.add(ChatConversation(id, name, subtitle, icon, isAdmin, unreadCount, if (lastMsg.isNotBlank()) listOf(ChatMessage("1", if (isAdmin) "Administrátor" else name, false, false, lastMsg, lastTime)) else emptyList()))
-                        }
-                    }
-                    runOnMain { onSuccess(items) }
-                    return@execute
+            val result = httpRequest(context, "chat.php?action=conversations&token=${tokenQuery(token)}", token = token)
+            val json = result.jsonOrNull()
+            if (result.code !in 200..299 || json == null) {
+                runOnMain { onError(apiErrorText(result, "Chat se nepodařilo načíst.")) }
+                return@runInBackground
+            }
+            val array = json.optJSONArray("conversations")
+            val items = mutableListOf<ChatConversation>()
+            if (array != null) {
+                for (i in 0 until array.length()) {
+                    val obj = array.optJSONObject(i) ?: continue
+                    val id = obj.optString("id", "")
+                    val name = obj.optString("name", "")
+                    val subtitle = obj.optString("subtitle", "")
+                    val icon = obj.optString("icon", "👤")
+                    val isAdmin = obj.optBoolean("is_admin", false)
+                    val unreadCount = obj.optInt("unread_count", 0)
+                    val lastMsg = obj.optString("last_message", "")
+                    val lastTime = obj.optString("last_time", "")
+                    items.add(ChatConversation(id, name, subtitle, icon, isAdmin, unreadCount, if (lastMsg.isNotBlank()) listOf(ChatMessage("1", if (isAdmin) "Administrátor" else name, false, false, lastMsg, lastTime)) else emptyList()))
                 }
             }
-        } catch (_: Exception) {} finally { connection?.disconnect(); executor.shutdown() }
+            runOnMain { onSuccess(items) }
+        } catch (e: Exception) {
+            runOnMain { onError(friendlyNetworkError(e)) }
+        }
     }
 }
 
-private fun fetchChatMessagesFromApi(context: Context, token: String, conversationId: String, onSuccess: (List<ChatMessage>) -> Unit) {
+private fun fetchChatMessagesFromApi(context: Context, token: String, conversationId: String, onSuccess: (List<ChatMessage>) -> Unit, onError: (String) -> Unit = {}) {
     if (token.isBlank()) return
-    val baseUrl = getApiBaseUrl(context)
-    val executor = Executors.newSingleThreadExecutor()
-    executor.execute {
-        var connection: HttpURLConnection? = null
+    runInBackground {
         try {
-            val url = URL("$baseUrl/chat.php?action=thread&conversation_id=${URLEncoder.encode(conversationId, "UTF-8")}&token=${URLEncoder.encode(token, "UTF-8")}")
-            connection = url.openConnection() as HttpURLConnection
-            connection.requestMethod = "GET"
-            connection.connectTimeout = 10000
-            connection.readTimeout = 10000
-            connection.setRequestProperty("Accept", "application/json")
-            connection.setRequestProperty("Authorization", "Bearer $token")
-
-            val responseCode = connection.responseCode
-            if (responseCode in 200..299) {
-                val response = BufferedReader(InputStreamReader(connection.inputStream, StandardCharsets.UTF_8)).use { it.readText() }
-                if (response.isNotBlank()) {
-                    val json = JSONObject(response)
-                    val array = json.optJSONArray("messages")
-                    val items = mutableListOf<ChatMessage>()
-                    if (array != null) {
-                        for (i in 0 until array.length()) {
-                            val obj = array.optJSONObject(i) ?: continue
-                            val id = obj.optString("id", i.toString())
-                            val senderName = obj.optString("sender_name", "")
-                            val isMe = obj.optBoolean("is_me", false)
-                            val isRead = obj.optBoolean("is_read", false)
-                            val text = obj.optString("text", "")
-                            val time = obj.optString("time", "")
-
-                            items.add(ChatMessage(id, senderName, isMe, isRead, text, time))
-                        }
-                    }
-                    runOnMain { onSuccess(items) }
-                    return@execute
+            val result = httpRequest(context, "chat.php?action=thread&conversation_id=${URLEncoder.encode(conversationId, "UTF-8")}&token=${tokenQuery(token)}", token = token)
+            val json = result.jsonOrNull()
+            if (result.code !in 200..299 || json == null) {
+                runOnMain { onError(apiErrorText(result, "Zprávy se nepodařilo načíst.")) }
+                return@runInBackground
+            }
+            val array = json.optJSONArray("messages")
+            val items = mutableListOf<ChatMessage>()
+            if (array != null) {
+                for (i in 0 until array.length()) {
+                    val obj = array.optJSONObject(i) ?: continue
+                    items.add(
+                        ChatMessage(
+                            id = obj.optString("id", i.toString()),
+                            senderName = obj.optString("sender_name", ""),
+                            isMe = obj.optBoolean("is_me", false),
+                            isRead = obj.optBoolean("is_read", false),
+                            wasUnread = obj.optBoolean("coach_unread", false),
+                            text = obj.optString("text", ""),
+                            time = obj.optString("time", "")
+                        )
+                    )
                 }
             }
-        } catch (_: Exception) {} finally { connection?.disconnect(); executor.shutdown() }
+            runOnMain { onSuccess(items) }
+        } catch (e: Exception) {
+            runOnMain { onError(friendlyNetworkError(e)) }
+        }
     }
 }
 
 private fun sendChatMessageApi(context: Context, token: String, conversationId: String, body: String, onSuccess: () -> Unit, onError: (String) -> Unit) {
-    val baseUrl = getApiBaseUrl(context)
     if (token.isBlank()) return
-    val executor = Executors.newSingleThreadExecutor()
-    executor.execute {
-        var connection: HttpURLConnection? = null
+    runInBackground {
         try {
-            val url = URL("$baseUrl/chat.php?action=send&token=${URLEncoder.encode(token, "UTF-8")}")
-            connection = url.openConnection() as HttpURLConnection
-            connection.requestMethod = "POST"
-            connection.connectTimeout = 10000
-            connection.readTimeout = 10000
-            connection.doOutput = true
-            connection.setRequestProperty("Content-Type", "application/json; charset=UTF-8")
-            connection.setRequestProperty("Authorization", "Bearer $token")
-
             val jsonBody = JSONObject().apply {
                 put("conversation_id", conversationId)
                 put("body", body)
             }
-            OutputStreamWriter(connection.outputStream, StandardCharsets.UTF_8).use { it.write(jsonBody.toString()); it.flush() }
-            if (connection.responseCode in 200..299) runOnMain { onSuccess() }
-            else runOnMain { onError("Chyba odeslání") }
-        } catch (e: Exception) { runOnMain { onError("Chyba: ${e.message}") } }
-        finally { connection?.disconnect(); executor.shutdown() }
+            val result = httpRequest(context, "chat.php?action=send&token=${tokenQuery(token)}", "POST", token, jsonBody)
+            val json = result.jsonOrNull()
+            val explicitFail = json != null && json.has("success") && !json.optBoolean("success")
+            if (result.code in 200..299 && !explicitFail) runOnMain { onSuccess() }
+            else runOnMain { onError(apiErrorText(result, "Chyba odeslání.")) }
+        } catch (e: Exception) {
+            runOnMain { onError(friendlyNetworkError(e)) }
+        }
     }
 }
 
-private fun startTrainingApi(context: Context, token: String, athleteId: Int, workoutSetId: Int, onSuccess: (JSONObject) -> Unit, onError: (String) -> Unit) {
-    val baseUrl = getApiBaseUrl(context)
-    if (token.isBlank()) return
-    val executor = Executors.newSingleThreadExecutor()
-    executor.execute {
-        var connection: HttpURLConnection? = null
+private fun fetchOpenSessions(context: Context, token: String, onSuccess: (List<OpenSession>) -> Unit) {
+    if (token.isBlank()) {
+        onSuccess(emptyList())
+        return
+    }
+    runInBackground {
         try {
-            val url = URL("$baseUrl/training_start.php?token=${URLEncoder.encode(token, "UTF-8")}")
-            connection = url.openConnection() as HttpURLConnection
-            connection.requestMethod = "POST"
-            connection.connectTimeout = 15000
-            connection.readTimeout = 15000
-            connection.doOutput = true
-            connection.setRequestProperty("Content-Type", "application/json; charset=UTF-8")
-            connection.setRequestProperty("Authorization", "Bearer $token")
+            val result = httpRequest(context, "training_session.php?action=open&token=${tokenQuery(token)}", token = token)
+            val json = result.jsonOrNull()
+            if (result.code !in 200..299 || json == null || !json.optBoolean("success", false)) {
+                runOnMain { onSuccess(emptyList()) }
+                return@runInBackground
+            }
+            val array = json.optJSONArray("sessions")
+            val items = mutableListOf<OpenSession>()
+            if (array != null) {
+                for (i in 0 until array.length()) {
+                    val obj = array.optJSONObject(i) ?: continue
+                    val id = obj.optInt("id", 0)
+                    if (id <= 0) continue
+                    items.add(
+                        OpenSession(
+                            id = id,
+                            athleteId = obj.optInt("athlete_id", 0),
+                            athleteName = obj.optString("athlete_name", "Sportovec"),
+                            setName = obj.optString("workout_set_name", "Trénink"),
+                            startedAt = obj.optString("started_at", "")
+                        )
+                    )
+                }
+            }
+            runOnMain { onSuccess(items) }
+        } catch (_: Exception) {
+            runOnMain { onSuccess(emptyList()) }
+        }
+    }
+}
 
+private fun startTrainingApi(
+    context: Context,
+    token: String,
+    athleteId: Int,
+    workoutSetId: Int,
+    onSuccess: (JSONObject) -> Unit,
+    onError: (String) -> Unit,
+    onExistingSession: (Int, String) -> Unit = { _, message -> onError(message) }
+) {
+    if (token.isBlank()) return
+    runInBackground {
+        try {
             val jsonBody = JSONObject().apply {
                 put("athlete_id", athleteId)
                 put("workout_set_id", workoutSetId)
             }
-            OutputStreamWriter(connection.outputStream, StandardCharsets.UTF_8).use { it.write(jsonBody.toString()); it.flush() }
-            val responseCode = connection.responseCode
-            val inputStream = if (responseCode in 200..299) connection.inputStream else connection.errorStream
-            val response = BufferedReader(InputStreamReader(connection.inputStream, StandardCharsets.UTF_8)).use { it.readText() }
-
-            if (response.isBlank()) { runOnMain { onError("Server vrátil prázdnou odpověď.") }; return@execute }
-            val json = JSONObject(response)
-            if (!json.optBoolean("success", false)) {
-                val err = json.optString("error", "Spuštění tréninku se nepodařilo.")
-                runOnMain { onError(err) }
-                return@execute
+            val result = httpRequest(context, "training_start.php?token=${tokenQuery(token)}", "POST", token, jsonBody)
+            val json = result.jsonOrNull()
+            val existingId = json?.optInt("existing_session_id", 0) ?: 0
+            if (existingId > 0 && (result.code == 409 || json?.optBoolean("success", false) != true)) {
+                runOnMain { onExistingSession(existingId, apiErrorText(result, "Sportovec už má rozpracovaný trénink.")) }
+                return@runInBackground
+            }
+            if (result.code !in 200..299 || json == null || !json.optBoolean("success", false)) {
+                runOnMain { onError(apiErrorText(result, "Spuštění tréninku se nepodařilo.")) }
+                return@runInBackground
             }
             runOnMain { onSuccess(json) }
-        } catch (e: Exception) { runOnMain { onError("Chyba: ${e.message}") } }
-        finally { connection?.disconnect(); executor.shutdown() }
+        } catch (e: Exception) {
+            runOnMain { onError(friendlyNetworkError(e)) }
+        }
     }
 }
 
 private fun loginToApi(username: String, password: String, context: Context, onSuccess: (String, String, String, JSONObject) -> Unit, onError: (String) -> Unit) {
-    val baseUrl = getApiBaseUrl(context)
-    val executor = Executors.newSingleThreadExecutor()
-    executor.execute {
-        var connection: HttpURLConnection? = null
+    runInBackground {
         try {
-            val url = URL("$baseUrl/login.php")
-            connection = url.openConnection() as HttpURLConnection
-            connection.requestMethod = "POST"
-            connection.connectTimeout = 15000
-            connection.readTimeout = 15000
-            connection.doOutput = true
-            connection.useCaches = false
-            connection.setRequestProperty("Content-Type", "application/json; charset=UTF-8")
-            connection.setRequestProperty("Accept", "application/json")
-
             val jsonBody = JSONObject().apply {
                 put("username", username)
                 put("password", password)
             }
-            OutputStreamWriter(connection.outputStream, StandardCharsets.UTF_8).use { it.write(jsonBody.toString()); it.flush() }
-            val responseCode = connection.responseCode
-            val inputStream = if (responseCode in 200..299) connection.inputStream else connection.errorStream
-            val response = BufferedReader(InputStreamReader(connection.inputStream, StandardCharsets.UTF_8)).use { it.readText() }
-
-            if (response.isBlank()) { runOnMain { onError("Server vrátil prázdnou odpověď. HTTP $responseCode ($baseUrl)") }; return@execute }
-            val json = JSONObject(response)
+            val result = httpRequest(context, "login.php", "POST", jsonBody = jsonBody)
+            val json = result.jsonOrNull()
+            if (json == null) {
+                runOnMain { onError(apiErrorText(result, "Server vrátil prázdnou odpověď.")) }
+                return@runInBackground
+            }
             if (!json.optBoolean("success", false)) {
-                val error = json.optString("error", "Nesprávné uživatelské jméno nebo heslo.")
-                runOnMain { onError(error) }
-                return@execute
+                runOnMain { onError(json.optString("error", "Nesprávné uživatelské jméno nebo heslo.")) }
+                return@runInBackground
             }
             val coach = json.optJSONObject("coach") ?: json.optJSONObject("user")
             val name = coach?.optString("name", "")?.takeIf { it.isNotBlank() } ?: json.optString("name", username)
             val id = coach?.optString("id", "")?.takeIf { it.isNotBlank() } ?: json.optString("id", "")
             val newToken = json.optString("token", "")
-
-            if (newToken.isBlank()) { runOnMain { onError("Přihlášení proběhlo, ale server nevrátil token.") }; return@execute }
+            if (newToken.isBlank()) {
+                runOnMain { onError("Přihlášení proběhlo, ale server nevrátil token.") }
+                return@runInBackground
+            }
             runOnMain { onSuccess(name, id, newToken, json) }
         } catch (e: Exception) {
-            val userMsg = when {
-                e is UnknownHostException || e.cause is UnknownHostException -> "Nelze se připojit k serveru ($baseUrl). Zkontrolujte adresu serveru v nastavení ⚙️."
-                e is SocketTimeoutException -> "Vypršel časový limit připojení k serveru."
-                else -> "Chyba připojení: ${e.message ?: "neznámá"}"
-            }
-            runOnMain { onError(userMsg) }
-        } finally { connection?.disconnect(); executor.shutdown() }
+            runOnMain { onError(friendlyNetworkError(e)) }
+        }
     }
 }
 
 private fun logoutFromApi(context: Context, token: String) {
     if (token.isBlank()) return
-    val baseUrl = getApiBaseUrl(context)
-    val executor = Executors.newSingleThreadExecutor()
-    executor.execute {
-        var connection: HttpURLConnection? = null
+    runInBackground {
         try {
-            val url = URL("$baseUrl/logout.php?token=${URLEncoder.encode(token, "UTF-8")}")
-            connection = URL(url.toString()).openConnection() as HttpURLConnection
-            connection.requestMethod = "POST"
-            connection.connectTimeout = 10000
-            connection.readTimeout = 10000
-            connection.doOutput = true
-            connection.setRequestProperty("Content-Type", "application/json; charset=UTF-8")
-            connection.setRequestProperty("Authorization", "Bearer $token")
-
             val jsonBody = JSONObject().apply { put("token", token) }
-            OutputStreamWriter(connection.outputStream, StandardCharsets.UTF_8).use { it.write(jsonBody.toString()); it.flush() }
-            connection.responseCode
-        } catch (_: Exception) {} finally { connection?.disconnect(); executor.shutdown() }
+            httpRequest(context, "logout.php?token=${tokenQuery(token)}", "POST", token, jsonBody)
+        } catch (_: Exception) {
+        }
     }
 }
 
@@ -2697,11 +3363,11 @@ private fun DashboardTile(icon: String, title: String, modifier: Modifier, badge
 }
 
 @Composable
-private fun BottomNavigationBar(current: String, unreadChatCount: Int = 0, onNavigate: (String) -> Unit) {
+private fun BottomNavigationBar(current: String, unreadChatCount: Int = 0, pendingCalendarCount: Int = 0, onNavigate: (String) -> Unit) {
     Row(modifier = Modifier.fillMaxWidth().background(Color.White).padding(horizontal = 5.dp, vertical = 7.dp), horizontalArrangement = Arrangement.SpaceEvenly) {
         NavigationItem("⌂", "Domů", current == "dashboard") { onNavigate("dashboard") }
         NavigationItem("👥", "Sportovci", current == "athletes") { onNavigate("athletes") }
-        NavigationItem("📅", "Kalendář", current == "calendar") { onNavigate("calendar") }
+        NavigationItem("📅", "Kalendář", current == "calendar", badgeCount = pendingCalendarCount) { onNavigate("calendar") }
         NavigationItem("💬", "Chat", current == "chat", badgeCount = unreadChatCount) { onNavigate("chat") }
     }
 }
@@ -2728,11 +3394,53 @@ private fun NavigationItem(icon: String, label: String, active: Boolean, badgeCo
 }
 
 @Composable
+private fun QuarterHourDropdown(
+    label: String,
+    hour: Int,
+    minute: Int,
+    onHourChange: (Int) -> Unit,
+    onMinuteChange: (Int) -> Unit
+) {
+    var hourMenu by remember { mutableStateOf(false) }
+    var minuteMenu by remember { mutableStateOf(false) }
+    val minutes = listOf(0, 15, 30, 45)
+
+    Column(modifier = Modifier.fillMaxWidth()) {
+        AppText(label, fontSize = 12.sp, color = TrainerAppGray)
+        Spacer(Modifier.height(4.dp))
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Box(modifier = Modifier.weight(1f)) {
+                Card(modifier = Modifier.fillMaxWidth().clickable { hourMenu = true }, colors = CardDefaults.cardColors(containerColor = TrainerAppLight)) {
+                    AppText(String.format(Locale.getDefault(), "%02d h", hour), modifier = Modifier.padding(12.dp), fontWeight = FontWeight.Bold)
+                }
+                DropdownMenu(expanded = hourMenu, onDismissRequest = { hourMenu = false }) {
+                    (5..22).forEach { value ->
+                        DropdownMenuItem(text = { AppText(String.format(Locale.getDefault(), "%02d", value)) }, onClick = { onHourChange(value); hourMenu = false })
+                    }
+                }
+            }
+            Box(modifier = Modifier.weight(1f)) {
+                Card(modifier = Modifier.fillMaxWidth().clickable { minuteMenu = true }, colors = CardDefaults.cardColors(containerColor = TrainerAppLight)) {
+                    AppText(String.format(Locale.getDefault(), "%02d min", minute), modifier = Modifier.padding(12.dp), fontWeight = FontWeight.Bold)
+                }
+                DropdownMenu(expanded = minuteMenu, onDismissRequest = { minuteMenu = false }) {
+                    minutes.forEach { value ->
+                        DropdownMenuItem(text = { AppText(String.format(Locale.getDefault(), "%02d", value)) }, onClick = { onMinuteChange(value); minuteMenu = false })
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
 private fun CreateCalendarEventDialog(
     athletes: List<AthleteItem>,
     venues: List<VenueItem>,
     token: String,
     context: Context,
+    initialDate: String,
+    initialStartHour: Int,
     onDismiss: () -> Unit,
     onCreated: () -> Unit
 ) {
@@ -2744,84 +3452,146 @@ private fun CreateCalendarEventDialog(
         }
     }
 
+    var mode by remember { mutableStateOf("event") }
     val eventTypes = listOf("Trénink", "Konzultace", "Skupinová lekce", "Jiné")
     var selectedEventType by remember { mutableStateOf("Trénink") }
     var eventTypeDropdown by remember { mutableStateOf(false) }
-
     var customTitle by remember { mutableStateOf("") }
+    var lockNote by remember { mutableStateOf("Uzamčený čas") }
 
     var selectedVenue by remember(availableVenues) { mutableStateOf<VenueItem?>(availableVenues.firstOrNull()) }
     var venueDropdown by remember { mutableStateOf(false) }
     var customLocation by remember { mutableStateOf("") }
 
-    var selectedAthlete by remember { mutableStateOf<AthleteItem?>(athletes.firstOrNull()) }
+    var athleteChosen by remember { mutableStateOf(false) }
+    var selectedAthlete by remember { mutableStateOf<AthleteItem?>(null) }
     var athleteDropdown by remember { mutableStateOf(false) }
 
-    var dateStr by remember { mutableStateOf(SimpleDateFormat("yyyy-MM-dd", Locale.getDefault()).format(Calendar.getInstance().time)) }
-    var startTimeStr by remember { mutableStateOf("09:00") }
-    var endTimeStr by remember { mutableStateOf("10:00") }
+    var dateStr by remember { mutableStateOf(initialDate) }
+    var startHour by remember { mutableIntStateOf(initialStartHour.coerceIn(5, 21)) }
+    var startMinute by remember { mutableIntStateOf(0) }
+    var endHour by remember { mutableIntStateOf((initialStartHour + 1).coerceIn(6, 22)) }
+    var endMinute by remember { mutableIntStateOf(0) }
     var isSaving by remember { mutableStateOf(false) }
     var errorMsg by remember { mutableStateOf("") }
 
     AlertDialog(
+        modifier = Modifier.imePadding(),
         onDismissRequest = onDismiss,
-        title = { AppText("Nová událost v kalendáři", color = TrainerAppNavy, fontWeight = FontWeight.Bold) },
+        title = { AppText(if (mode == "lock") "Uzamknout čas" else "Nová událost v kalendáři", color = TrainerAppNavy, fontWeight = FontWeight.Bold) },
         text = {
             Column(modifier = Modifier.fillMaxWidth().verticalScroll(rememberScrollState())) {
-                AppText("Typ události:", fontSize = 12.sp, color = TrainerAppGray)
-                Box {
-                    Card(modifier = Modifier.fillMaxWidth().clickable { eventTypeDropdown = true }, colors = CardDefaults.cardColors(containerColor = TrainerAppLight)) {
-                        AppText(selectedEventType, modifier = Modifier.padding(12.dp), fontWeight = FontWeight.Bold)
-                    }
-                    DropdownMenu(expanded = eventTypeDropdown, onDismissRequest = { eventTypeDropdown = false }) {
-                        eventTypes.forEach { type ->
-                            DropdownMenuItem(text = { AppText(type) }, onClick = { selectedEventType = type; eventTypeDropdown = false })
-                        }
-                    }
-                }
-                Spacer(Modifier.height(8.dp))
-
-                if (selectedEventType == "Jiné" || selectedEventType == "Konzultace") {
-                    OutlinedTextField(value = customTitle, onValueChange = { customTitle = it }, label = { AppText("Vlastní název události") }, modifier = Modifier.fillMaxWidth(), singleLine = true)
-                    Spacer(Modifier.height(8.dp))
-                }
-
-                AppText("Místo konání (Sportoviště):", fontSize = 12.sp, color = TrainerAppGray)
-                Box {
-                    Card(modifier = Modifier.fillMaxWidth().clickable { venueDropdown = true }, colors = CardDefaults.cardColors(containerColor = TrainerAppLight)) {
-                        AppText(selectedVenue?.name ?: if (customLocation.isNotBlank()) customLocation else "Vyberte místo...", modifier = Modifier.padding(12.dp), fontWeight = FontWeight.Bold)
-                    }
-                    DropdownMenu(expanded = venueDropdown, onDismissRequest = { venueDropdown = false }) {
-                        availableVenues.forEach { v ->
-                            DropdownMenuItem(text = { AppText(v.name) }, onClick = { selectedVenue = v; venueDropdown = false })
-                        }
-                        DropdownMenuItem(text = { AppText("➕ Vlastní místo konání") }, onClick = { selectedVenue = null; venueDropdown = false })
-                    }
-                }
-                if (selectedVenue == null) {
-                    Spacer(Modifier.height(6.dp))
-                    OutlinedTextField(value = customLocation, onValueChange = { customLocation = it }, label = { AppText("Zadejte vlastní místo") }, modifier = Modifier.fillMaxWidth(), singleLine = true)
-                }
-                Spacer(Modifier.height(8.dp))
-
-                AppText("Sportovec:", fontSize = 12.sp, color = TrainerAppGray)
-                Box {
-                    Card(modifier = Modifier.fillMaxWidth().clickable { athleteDropdown = true }, colors = CardDefaults.cardColors(containerColor = TrainerAppLight)) {
-                        AppText(selectedAthlete?.name ?: "Bez sportovce", modifier = Modifier.padding(12.dp), fontWeight = FontWeight.Bold)
-                    }
-                    DropdownMenu(expanded = athleteDropdown, onDismissRequest = { athleteDropdown = false }) {
-                        athletes.forEach { ath ->
-                            DropdownMenuItem(text = { AppText(ath.name) }, onClick = { selectedAthlete = ath; athleteDropdown = false })
-                        }
-                    }
-                }
-                Spacer(Modifier.height(8.dp))
-
-                OutlinedTextField(value = dateStr, onValueChange = { dateStr = it }, label = { AppText("Datum (YYYY-MM-DD)") }, modifier = Modifier.fillMaxWidth(), singleLine = true)
-                Spacer(Modifier.height(8.dp))
                 Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    OutlinedTextField(value = startTimeStr, onValueChange = { startTimeStr = it }, label = { AppText("Od (HH:MM)") }, modifier = Modifier.weight(1f), singleLine = true)
-                    OutlinedTextField(value = endTimeStr, onValueChange = { endTimeStr = it }, label = { AppText("Do (HH:MM)") }, modifier = Modifier.weight(1f), singleLine = true)
+                    Button(
+                        onClick = { mode = "event" },
+                        modifier = Modifier.weight(1f),
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = if (mode == "event") TrainerAppYellow else TrainerAppLight,
+                            contentColor = TrainerAppNavy
+                        )
+                    ) { AppText("Událost", fontWeight = FontWeight.Bold) }
+                    Button(
+                        onClick = { mode = "lock" },
+                        modifier = Modifier.weight(1f),
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = if (mode == "lock") TrainerAppNavy else TrainerAppLight,
+                            contentColor = if (mode == "lock") Color.White else TrainerAppNavy
+                        )
+                    ) { AppText("Uzamčení", fontWeight = FontWeight.Bold) }
+                }
+                Spacer(Modifier.height(10.dp))
+
+                var showDatePicker by remember { mutableStateOf(false) }
+                Card(
+                    modifier = Modifier.fillMaxWidth().clickable { showDatePicker = true },
+                    colors = CardDefaults.cardColors(containerColor = TrainerAppLight)
+                ) {
+                    Column(Modifier.padding(12.dp)) {
+                        AppText("Datum", fontSize = 12.sp, color = TrainerAppGray)
+                        AppText(formatTrainingDate(dateStr), fontWeight = FontWeight.Bold, color = TrainerAppNavy)
+                    }
+                }
+                if (showDatePicker) {
+                    val pickerState = rememberDatePickerState(initialSelectedDateMillis = dateStringToUtcMillis(dateStr))
+                    DatePickerDialog(
+                        onDismissRequest = { showDatePicker = false },
+                        confirmButton = {
+                            TextButton(onClick = {
+                                pickerState.selectedDateMillis?.let { dateStr = utcMillisToDateString(it) }
+                                showDatePicker = false
+                            }) { AppText("Vybrat", fontWeight = FontWeight.Bold) }
+                        },
+                        dismissButton = {
+                            TextButton(onClick = { showDatePicker = false }) { AppText("Zrušit") }
+                        }
+                    ) {
+                        DatePicker(state = pickerState)
+                    }
+                }
+                Spacer(Modifier.height(8.dp))
+                QuarterHourDropdown("Od", startHour, startMinute, { startHour = it }, { startMinute = it })
+                Spacer(Modifier.height(8.dp))
+                QuarterHourDropdown("Do", endHour, endMinute, { endHour = it }, { endMinute = it })
+                Spacer(Modifier.height(8.dp))
+
+                if (mode == "lock") {
+                    OutlinedTextField(value = lockNote, onValueChange = { lockNote = it }, label = { AppText("Poznámka") }, modifier = Modifier.fillMaxWidth(), singleLine = true)
+                } else {
+                    AppText("Typ události:", fontSize = 12.sp, color = TrainerAppGray)
+                    Box {
+                        Card(modifier = Modifier.fillMaxWidth().clickable { eventTypeDropdown = true }, colors = CardDefaults.cardColors(containerColor = TrainerAppLight)) {
+                            AppText(selectedEventType, modifier = Modifier.padding(12.dp), fontWeight = FontWeight.Bold)
+                        }
+                        DropdownMenu(expanded = eventTypeDropdown, onDismissRequest = { eventTypeDropdown = false }) {
+                            eventTypes.forEach { type ->
+                                DropdownMenuItem(text = { AppText(type) }, onClick = { selectedEventType = type; eventTypeDropdown = false })
+                            }
+                        }
+                    }
+                    Spacer(Modifier.height(8.dp))
+
+                    if (selectedEventType == "Jiné" || selectedEventType == "Konzultace") {
+                        OutlinedTextField(value = customTitle, onValueChange = { customTitle = it }, label = { AppText("Vlastní název události") }, modifier = Modifier.fillMaxWidth(), singleLine = true)
+                        Spacer(Modifier.height(8.dp))
+                    }
+
+                    AppText("Místo konání (Sportoviště):", fontSize = 12.sp, color = TrainerAppGray)
+                    Box {
+                        Card(modifier = Modifier.fillMaxWidth().clickable { venueDropdown = true }, colors = CardDefaults.cardColors(containerColor = TrainerAppLight)) {
+                            AppText(selectedVenue?.name ?: if (customLocation.isNotBlank()) customLocation else "Vyberte místo...", modifier = Modifier.padding(12.dp), fontWeight = FontWeight.Bold)
+                        }
+                        DropdownMenu(expanded = venueDropdown, onDismissRequest = { venueDropdown = false }) {
+                            availableVenues.forEach { v ->
+                                DropdownMenuItem(text = { AppText(v.name) }, onClick = { selectedVenue = v; venueDropdown = false })
+                            }
+                            DropdownMenuItem(text = { AppText("➕ Vlastní místo konání") }, onClick = { selectedVenue = null; venueDropdown = false })
+                        }
+                    }
+                    if (selectedVenue == null) {
+                        Spacer(Modifier.height(6.dp))
+                        OutlinedTextField(value = customLocation, onValueChange = { customLocation = it }, label = { AppText("Zadejte vlastní místo") }, modifier = Modifier.fillMaxWidth(), singleLine = true)
+                    }
+                    Spacer(Modifier.height(8.dp))
+
+                    AppText("Sportovec:", fontSize = 12.sp, color = TrainerAppGray)
+                    Box {
+                        val athleteLabel = when {
+                            !athleteChosen -> "Vyberte"
+                            selectedAthlete == null -> "Bez sportovce"
+                            else -> selectedAthlete!!.name
+                        }
+                        Card(modifier = Modifier.fillMaxWidth().clickable { athleteDropdown = true }, colors = CardDefaults.cardColors(containerColor = TrainerAppLight)) {
+                            AppText(athleteLabel, modifier = Modifier.padding(12.dp), fontWeight = FontWeight.Bold, color = if (athleteChosen) TrainerAppNavy else TrainerAppGray)
+                        }
+                        DropdownMenu(expanded = athleteDropdown, onDismissRequest = { athleteDropdown = false }) {
+                            DropdownMenuItem(text = { AppText("Bez sportovce") }, onClick = { selectedAthlete = null; athleteChosen = true; athleteDropdown = false })
+                            athletes.forEach { ath ->
+                                DropdownMenuItem(text = { AppText(ath.name) }, onClick = { selectedAthlete = ath; athleteChosen = true; athleteDropdown = false })
+                            }
+                        }
+                    }
+                    Spacer(Modifier.height(4.dp))
+                    AppText("Bez sportovce je termín jen váš a sportovcům se tento čas zablokuje.", fontSize = 12.sp, color = TrainerAppGray)
                 }
 
                 if (errorMsg.isNotBlank()) {
@@ -2833,32 +3603,63 @@ private fun CreateCalendarEventDialog(
         confirmButton = {
             Button(
                 onClick = {
+                    val startTotal = startHour * 60 + startMinute
+                    val endTotal = endHour * 60 + endMinute
+                    if (endTotal <= startTotal) {
+                        errorMsg = "Konec musí být později než začátek."
+                        return@Button
+                    }
+                    if (mode == "event" && !athleteChosen) {
+                        errorMsg = "Vyberte sportovce, nebo zvolte Bez sportovce."
+                        return@Button
+                    }
                     isSaving = true
                     errorMsg = ""
-                    val startsAt = "$dateStr $startTimeStr:00"
-                    val endsAt = "$dateStr $endTimeStr:00"
-                    val athId = selectedAthlete?.id?.toIntOrNull()
-                    val finalTitle = if (customTitle.isNotBlank()) customTitle else selectedEventType
-                    val finalLocation = if (selectedVenue != null) selectedVenue!!.name else customLocation
-
-                    createCalendarEventApi(context, token, athId, finalTitle, finalLocation, startsAt, endsAt,
-                        onSuccess = { isSaving = false; onCreated() },
-                        onError = { err -> isSaving = false; errorMsg = err }
-                    )
+                    val startsAt = String.format(Locale.getDefault(), "%s %02d:%02d:00", dateStr, startHour, startMinute)
+                    val endsAt = String.format(Locale.getDefault(), "%s %02d:%02d:00", dateStr, endHour, endMinute)
+                    if (mode == "lock") {
+                        lockCalendarApi(context, token, lockNote.ifBlank { "Uzamčený čas" }, startsAt, endsAt,
+                            onSuccess = { isSaving = false; onCreated() },
+                            onError = { err -> isSaving = false; errorMsg = err }
+                        )
+                    } else {
+                        val athId = selectedAthlete?.id?.toIntOrNull()
+                        val finalTitle = if (customTitle.isNotBlank()) customTitle else selectedEventType
+                        val finalLocation = if (selectedVenue != null) selectedVenue!!.name else customLocation
+                        createCalendarEventApi(context, token, athId, finalTitle, finalLocation, startsAt, endsAt,
+                            onSuccess = { isSaving = false; onCreated() },
+                            onError = { err -> isSaving = false; errorMsg = err }
+                        )
+                    }
                 },
                 enabled = !isSaving,
                 colors = ButtonDefaults.buttonColors(containerColor = TrainerAppYellow, contentColor = TrainerAppNavy)
             ) {
-                AppText("Vytvořit", fontWeight = FontWeight.Bold)
+                AppText(if (mode == "lock") "Uzamknout" else "Vytvořit", fontWeight = FontWeight.Bold)
             }
         },
         dismissButton = { TextButton(onClick = onDismiss) { AppText("Zrušit") } }
     )
 }
 
+private data class SlotTime(val date: String, val hour: Int, val minute: Int)
+
+private fun parseSlotTime(raw: String, fallbackDate: String, fallbackHour: Int): SlotTime {
+    val date = raw.trim().take(10).ifBlank { fallbackDate }
+    val hour = raw.drop(11).take(2).toIntOrNull() ?: fallbackHour
+    val minuteRaw = raw.drop(14).take(2).toIntOrNull() ?: 0
+    val minute = listOf(0, 15, 30, 45).minBy { value -> if (value >= minuteRaw) value - minuteRaw else minuteRaw - value }
+    return SlotTime(date, hour.coerceIn(5, 22), minute)
+}
+
+private fun slotStamp(date: String, hour: Int, minute: Int): String {
+    return String.format(Locale.US, "%s %02d:%02d:00", date, hour, minute)
+}
+
 @Composable
 private fun CalendarEventActionDialog(
     event: TrainingItem,
+    athletes: List<AthleteItem>,
     actionHour: Int,
     token: String,
     context: Context,
@@ -2866,89 +3667,212 @@ private fun CalendarEventActionDialog(
     onActionDone: () -> Unit
 ) {
     var isProcessing by remember { mutableStateOf(false) }
+    var actionError by remember { mutableStateOf("") }
+    var editing by remember { mutableStateOf(false) }
+    val startSlot = remember(event.id) { parseSlotTime(event.startsAt, event.date, event.startHour) }
+    val endSlot = remember(event.id) { parseSlotTime(event.endsAt, event.date, event.endHour) }
+    var dateStr by remember(event.id) { mutableStateOf(startSlot.date.ifBlank { event.date }) }
+    var startHour by remember(event.id) { mutableIntStateOf(startSlot.hour) }
+    var startMinute by remember(event.id) { mutableIntStateOf(startSlot.minute) }
+    var endHour by remember(event.id) { mutableIntStateOf(endSlot.hour) }
+    var endMinute by remember(event.id) { mutableIntStateOf(endSlot.minute) }
+    var title by remember(event.id) { mutableStateOf(event.title.ifBlank { event.detail.substringBefore(" • ") }) }
+    var location by remember(event.id) { mutableStateOf(event.location) }
+    var athleteId by remember(event.id) { mutableIntStateOf(event.athleteId) }
+    var showDatePicker by remember { mutableStateOf(false) }
+    var athleteMenu by remember { mutableStateOf(false) }
+    val pending = event.approvalStatus.equals("pending", true) && !event.isLocked
+
+    fun approve(withEdits: Boolean) {
+        val numId = event.id.toIntOrNull() ?: 0
+        if (numId <= 0) {
+            actionError = "Událost nemá platné ID."
+            return
+        }
+        val starts = if (withEdits) slotStamp(dateStr, startHour, startMinute) else ""
+        val ends = if (withEdits) slotStamp(dateStr, endHour, endMinute) else ""
+        if (withEdits && ends <= starts) {
+            actionError = "Konec musí být později než začátek."
+            return
+        }
+        isProcessing = true
+        actionError = ""
+        approveCalendarEventApi(
+            context, token, numId,
+            startsAt = starts,
+            endsAt = ends,
+            title = if (withEdits) title.trim() else null,
+            location = if (withEdits) location.trim() else null,
+            athleteId = if (withEdits) athleteId else null,
+            onSuccess = { isProcessing = false; onActionDone() },
+            onError = { message -> isProcessing = false; actionError = message }
+        )
+    }
 
     AlertDialog(
+        modifier = Modifier.imePadding(),
         onDismissRequest = onDismiss,
-        title = { AppText(if (event.isLocked) "Odemknout uzamčený čas" else event.detail, color = TrainerAppNavy, fontWeight = FontWeight.Bold) },
+        title = { AppText(if (event.isLocked) "Odemknout uzamčený čas" else if (pending) "Žádost sportovce" else event.detail, color = TrainerAppNavy, fontWeight = FontWeight.Bold) },
         text = {
-            Column {
+            Column(modifier = Modifier.fillMaxWidth().verticalScroll(rememberScrollState())) {
                 if (event.isLocked) {
                     AppText("Uzamčený úsek: ${event.time}", fontSize = 14.sp, fontWeight = FontWeight.Bold)
                     Spacer(Modifier.height(6.dp))
                     AppText("Chcete odemknout tento časový úsek (${event.time})?", fontSize = 13.sp, color = TrainerAppGray)
-                } else {
+                } else if (!editing) {
                     AppText("Sportovec: ${event.athleteName}", fontSize = 14.sp)
                     AppText("Čas: ${event.time}", fontSize = 13.sp, color = TrainerAppGray)
                     if (event.detail.isNotBlank()) AppText(event.detail, fontSize = 13.sp, color = TrainerAppGray)
+                    if (pending) {
+                        Spacer(Modifier.height(8.dp))
+                        AppText("Můžete žádost schválit, zamítnout, nebo upravit termín a pak schválit.", fontSize = 13.sp, color = TrainerAppNavy)
+                    }
+                } else {
+                    AppText("Úprava před schválením", fontSize = 14.sp, fontWeight = FontWeight.Bold, color = TrainerAppNavy)
+                    Spacer(Modifier.height(8.dp))
+                    Card(modifier = Modifier.fillMaxWidth().clickable { showDatePicker = true }, colors = CardDefaults.cardColors(containerColor = TrainerAppLight)) {
+                        Column(Modifier.padding(12.dp)) {
+                            AppText("Datum", fontSize = 12.sp, color = TrainerAppGray)
+                            AppText(formatTrainingDate(dateStr), fontWeight = FontWeight.Bold, color = TrainerAppNavy)
+                        }
+                    }
+                    Spacer(Modifier.height(8.dp))
+                    QuarterHourDropdown("Začátek", startHour, startMinute, { startHour = it }, { startMinute = it })
+                    Spacer(Modifier.height(8.dp))
+                    QuarterHourDropdown("Konec", endHour, endMinute, { endHour = it }, { endMinute = it })
+                    Spacer(Modifier.height(8.dp))
+                    OutlinedTextField(value = title, onValueChange = { title = it }, label = { AppText("Název") }, modifier = Modifier.fillMaxWidth(), singleLine = true)
+                    Spacer(Modifier.height(8.dp))
+                    OutlinedTextField(value = location, onValueChange = { location = it }, label = { AppText("Místo") }, modifier = Modifier.fillMaxWidth(), singleLine = true)
+                    Spacer(Modifier.height(8.dp))
+                    AppText("Sportovec", fontSize = 12.sp, color = TrainerAppGray)
+                    Box {
+                        Card(modifier = Modifier.fillMaxWidth().clickable { athleteMenu = true }, colors = CardDefaults.cardColors(containerColor = TrainerAppLight)) {
+                            val selectedName = athletes.firstOrNull { it.id == athleteId.toString() }?.name ?: event.athleteName
+                            AppText(selectedName.ifBlank { "Beze změny" }, modifier = Modifier.padding(12.dp), fontWeight = FontWeight.Bold, color = TrainerAppNavy)
+                        }
+                        DropdownMenu(expanded = athleteMenu, onDismissRequest = { athleteMenu = false }) {
+                            athletes.forEach { athlete ->
+                                DropdownMenuItem(
+                                    text = { AppText(athlete.name) },
+                                    onClick = {
+                                        athleteId = athlete.id.toIntOrNull() ?: athleteId
+                                        athleteMenu = false
+                                    }
+                                )
+                            }
+                        }
+                    }
+                }
+                if (actionError.isNotBlank()) {
+                    Spacer(Modifier.height(8.dp))
+                    AppText(actionError, fontSize = 13.sp, color = Color(0xFFB00020))
                 }
             }
         },
         confirmButton = {
-            Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
-                if (event.approvalStatus == "pending") {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                if (pending && !editing) {
                     Button(
-                        onClick = {
-                            isProcessing = true
-                            approveCalendarEventApi(context, token, event.id.toIntOrNull() ?: 0, onSuccess = { isProcessing = false; onActionDone() }, onError = { isProcessing = false })
-                        },
+                        onClick = { approve(false) },
                         modifier = Modifier.fillMaxWidth(),
                         enabled = !isProcessing,
                         colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF137333))
-                    ) {
-                        AppText("Schválit", color = Color.White)
+                    ) { AppText("Schválit", color = Color.White) }
+                    Button(
+                        onClick = { editing = true; actionError = "" },
+                        modifier = Modifier.fillMaxWidth(),
+                        enabled = !isProcessing,
+                        colors = ButtonDefaults.buttonColors(containerColor = TrainerAppYellow, contentColor = TrainerAppNavy)
+                    ) { AppText("Schválit s úpravou", fontWeight = FontWeight.Bold) }
+                }
+                if (pending && editing) {
+                    Button(
+                        onClick = { approve(true) },
+                        modifier = Modifier.fillMaxWidth(),
+                        enabled = !isProcessing,
+                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF137333))
+                    ) { AppText(if (isProcessing) "Schvaluji…" else "Uložit a schválit", color = Color.White) }
+                    TextButton(onClick = { editing = false }, modifier = Modifier.fillMaxWidth(), enabled = !isProcessing) {
+                        AppText("Zpět", color = TrainerAppNavy)
                     }
                 }
-                Button(
-                    onClick = {
-                        isProcessing = true
-                        val numId = event.id.toIntOrNull() ?: 0
-                        val startTsStr = "${event.date} ${String.format(Locale.getDefault(), "%02d", actionHour)}:00:00"
-                        val endTsStr = "${event.date} ${String.format(Locale.getDefault(), "%02d", actionHour + 1)}:00:00"
-
-                        deleteCalendarEventApi(context, token, numId, startTsStr, endTsStr,
-                            onSuccess = { isProcessing = false; onActionDone() },
-                            onError = { isProcessing = false }
-                        )
-                    },
-                    modifier = Modifier.fillMaxWidth(),
-                    enabled = !isProcessing,
-                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFB00020))
-                ) {
-                    AppText(if (event.isLocked) "Odemknout tuto hodinu" else "Smazat", color = Color.White)
-                }
-                if (event.isLocked) {
+                if (!editing) {
                     Button(
                         onClick = {
                             isProcessing = true
+                            actionError = ""
+                            val numId = event.id.toIntOrNull() ?: 0
+                            val startTsStr = "${event.date} ${String.format(Locale.getDefault(), "%02d", actionHour)}:00:00"
+                            val endTsStr = "${event.date} ${String.format(Locale.getDefault(), "%02d", actionHour + 1)}:00:00"
+                            val rangeStart = if (event.isLocked) startTsStr else ""
+                            val rangeEnd = if (event.isLocked) endTsStr else ""
+                            deleteCalendarEventApi(context, token, numId, rangeStart, rangeEnd, reject = !event.isLocked,
+                                onSuccess = { isProcessing = false; onActionDone() },
+                                onError = { message -> isProcessing = false; actionError = message }
+                            )
+                        },
+                        modifier = Modifier.fillMaxWidth(),
+                        enabled = !isProcessing,
+                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFB00020))
+                    ) {
+                        AppText(
+                            when {
+                                event.isLocked -> "Odemknout tuto hodinu"
+                                pending -> "Zamítnout"
+                                else -> "Smazat"
+                            },
+                            color = Color.White
+                        )
+                    }
+                }
+                if (event.isLocked && !editing) {
+                    Button(
+                        onClick = {
+                            isProcessing = true
+                            actionError = ""
                             val numId = event.id.toIntOrNull() ?: 0
                             deleteCalendarEventApi(context, token, numId, "", "",
                                 onSuccess = { isProcessing = false; onActionDone() },
-                                onError = { isProcessing = false }
+                                onError = { message -> isProcessing = false; actionError = message }
                             )
                         },
                         modifier = Modifier.fillMaxWidth(),
                         enabled = !isProcessing,
                         colors = ButtonDefaults.buttonColors(containerColor = TrainerAppNavy)
-                    ) {
-                        AppText("Odemknout celý úsek", color = Color.White)
-                    }
+                    ) { AppText("Odemknout celý úsek", color = Color.White) }
                 }
+                TextButton(onClick = onDismiss, modifier = Modifier.fillMaxWidth()) { AppText("Zavřít", color = TrainerAppNavy) }
             }
-        },
-        dismissButton = { TextButton(onClick = onDismiss) { AppText("Zavřít") } }
+        }
     )
+
+    if (showDatePicker) {
+        val pickerState = rememberDatePickerState(initialSelectedDateMillis = dateStringToUtcMillis(dateStr.ifBlank { event.date }))
+        DatePickerDialog(
+            onDismissRequest = { showDatePicker = false },
+            confirmButton = {
+                TextButton(onClick = {
+                    pickerState.selectedDateMillis?.let { dateStr = utcMillisToDateString(it) }
+                    showDatePicker = false
+                }) { AppText("Vybrat", fontWeight = FontWeight.Bold) }
+            },
+            dismissButton = { TextButton(onClick = { showDatePicker = false }) { AppText("Zrušit") } }
+        ) { DatePicker(state = pickerState) }
+    }
 }
 
 @Composable
 private fun ChatListScreen(
     conversations: List<ChatConversation>,
     unreadChatCount: Int,
+    pendingCalendarCount: Int,
     onSelectConversation: (ChatConversation) -> Unit,
     onNavigate: (String) -> Unit
 ) {
     Surface(modifier = Modifier.fillMaxSize(), color = TrainerAppLight) {
         Column(modifier = Modifier.fillMaxSize().statusBarsPadding().navigationBarsPadding()) {
-            Row(modifier = Modifier.fillMaxWidth().background(TrainerAppNavy).padding(20.dp), verticalAlignment = Alignment.CenterVertically) {
+            Row(modifier = Modifier.fillMaxWidth().background(MetalHeaderBrush).padding(20.dp), verticalAlignment = Alignment.CenterVertically) {
                 AppText("💬", fontSize = 32.sp)
                 Spacer(Modifier.width(12.dp))
                 Column {
@@ -2966,21 +3890,21 @@ private fun ChatListScreen(
                 Spacer(Modifier.height(8.dp))
                 val athleteConvs = conversations.filter { !it.isAdmin }
                 if (athleteConvs.isEmpty()) {
-                    Card(modifier = Modifier.fillMaxWidth(), colors = CardDefaults.cardColors(containerColor = Color.White), shape = RoundedCornerShape(16.dp)) {
+                    Card(modifier = Modifier.fillMaxWidth(), colors = CardDefaults.cardColors(containerColor = MetalCard), shape = RoundedCornerShape(16.dp)) {
                         AppText("Pro započetí chatu se sportovci je potřeba mít načtené sportovce z účtu.", color = TrainerAppGray, modifier = Modifier.padding(16.dp), fontSize = 13.sp, textAlign = TextAlign.Center)
                     }
                 } else {
                     athleteConvs.forEach { conv -> ConversationCard(conv) { onSelectConversation(conv) }; Spacer(Modifier.height(8.dp)) }
                 }
             }
-            BottomNavigationBar(current = "chat", unreadChatCount = unreadChatCount, onNavigate = onNavigate)
+            BottomNavigationBar(current = "chat", unreadChatCount = unreadChatCount, pendingCalendarCount = pendingCalendarCount, onNavigate = onNavigate)
         }
     }
 }
 
 @Composable
 private fun ConversationCard(conversation: ChatConversation, onClick: () -> Unit) {
-    Card(modifier = Modifier.fillMaxWidth().clickable { onClick() }, colors = CardDefaults.cardColors(containerColor = Color.White), shape = RoundedCornerShape(16.dp)) {
+    Card(modifier = Modifier.fillMaxWidth().clickable { onClick() }, colors = CardDefaults.cardColors(containerColor = MetalCard), shape = RoundedCornerShape(16.dp)) {
         Row(modifier = Modifier.padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
             Box(modifier = Modifier.size(46.dp).clip(RoundedCornerShape(14.dp)).background(if (conversation.isAdmin) TrainerAppYellow else TrainerAppNavy), contentAlignment = Alignment.Center) {
                 AppText(conversation.icon, fontSize = 22.sp)
@@ -3004,25 +3928,86 @@ private fun ConversationCard(conversation: ChatConversation, onClick: () -> Unit
 }
 
 @Composable
-private fun ChatDetailScreen(conversation: ChatConversation, token: String, context: Context, onBack: () -> Unit) {
-    var messages by remember(conversation.id) { mutableStateOf(conversation.initialMessages) }
+private fun ChatBackButton(onClick: () -> Unit) {
+    Box(
+        modifier = Modifier
+            .size(36.dp)
+            .clip(CircleShape)
+            .background(Color.White.copy(alpha = 0.16f))
+            .clickable { onClick() },
+        contentAlignment = Alignment.Center
+    ) {
+        Canvas(modifier = Modifier.size(18.dp)) {
+            val stroke = Stroke(width = 2.2.dp.toPx(), cap = StrokeCap.Round, join = StrokeJoin.Round)
+            val path = Path().apply {
+                moveTo(size.width * 0.68f, size.height * 0.16f)
+                lineTo(size.width * 0.30f, size.height * 0.50f)
+                lineTo(size.width * 0.68f, size.height * 0.84f)
+            }
+            drawPath(path, color = Color.White, style = stroke)
+        }
+    }
+}
+
+@Composable
+private fun ChatDetailScreen(
+    conversation: ChatConversation,
+    token: String,
+    context: Context,
+    unreadChatCount: Int,
+    pendingCalendarCount: Int,
+    onBack: () -> Unit,
+    onNavigate: (String) -> Unit,
+    onConversationRead: () -> Unit
+) {
+    var messages by remember(conversation.id) { mutableStateOf<List<ChatMessage>>(emptyList()) }
     var messageText by remember { mutableStateOf("") }
     var isSending by remember { mutableStateOf(false) }
+    var chatError by remember { mutableStateOf("") }
+    var didInitialScroll by remember(conversation.id) { mutableStateOf(false) }
+    val listState = rememberLazyListState()
+
+    LaunchedEffect(conversation.id) {
+        cancelSystemNotification(context, 2001)
+        onConversationRead()
+    }
 
     LaunchedEffect(conversation.id, token) {
         if (token.isNotBlank()) {
-            fetchChatMessagesFromApi(context, token, conversation.id, onSuccess = { fetchedMsgs -> if (fetchedMsgs.isNotEmpty()) messages = fetchedMsgs })
+            fetchChatMessagesFromApi(
+                context, token, conversation.id,
+                onSuccess = { fetchedMsgs -> messages = fetchedMsgs; chatError = "" },
+                onError = { chatError = it }
+            )
             while (true) {
                 delay(5000)
-                fetchChatMessagesFromApi(context, token, conversation.id, onSuccess = { updated -> if (updated.isNotEmpty()) messages = updated })
+                fetchChatMessagesFromApi(
+                    context, token, conversation.id,
+                    onSuccess = { updated -> messages = updated; chatError = "" },
+                    onError = { chatError = it }
+                )
             }
         }
     }
 
+    LaunchedEffect(messages.size, conversation.id) {
+        if (messages.isEmpty()) return@LaunchedEffect
+        val target = if (!didInitialScroll) {
+            didInitialScroll = true
+            val unreadIndex = messages.indexOfFirst { it.wasUnread && !it.isMe }
+            if (unreadIndex >= 0) unreadIndex else messages.lastIndex
+        } else if (messages.lastOrNull()?.isMe == true) {
+            messages.lastIndex
+        } else {
+            return@LaunchedEffect
+        }
+        listState.animateScrollToItem(target)
+    }
+
     Surface(modifier = Modifier.fillMaxSize(), color = TrainerAppLight) {
         Column(modifier = Modifier.fillMaxSize().statusBarsPadding().navigationBarsPadding()) {
-            Row(modifier = Modifier.fillMaxWidth().background(TrainerAppNavy).padding(14.dp), verticalAlignment = Alignment.CenterVertically) {
-                IconButton(onClick = onBack) { AppText("←", color = Color.White, fontSize = 24.sp, fontWeight = FontWeight.Bold) }
+            Row(modifier = Modifier.fillMaxWidth().background(MetalHeaderBrush).padding(horizontal = 12.dp, vertical = 10.dp), verticalAlignment = Alignment.CenterVertically) {
+                ChatBackButton(onClick = onBack)
                 Spacer(Modifier.width(6.dp))
                 Box(modifier = Modifier.size(40.dp).clip(RoundedCornerShape(12.dp)).background(if (conversation.isAdmin) TrainerAppYellow else Color.White.copy(alpha = 0.2f)), contentAlignment = Alignment.Center) {
                     AppText(conversation.icon, fontSize = 20.sp)
@@ -3034,8 +4019,15 @@ private fun ChatDetailScreen(conversation: ChatConversation, token: String, cont
                 }
             }
 
-            Column(modifier = Modifier.weight(1f).fillMaxWidth().verticalScroll(rememberScrollState()).padding(16.dp), verticalArrangement = Arrangement.Bottom) {
-                messages.forEach { msg ->
+            LazyColumn(
+                state = listState,
+                modifier = Modifier.weight(1f).fillMaxWidth().padding(horizontal = 16.dp),
+                contentPadding = androidx.compose.foundation.layout.PaddingValues(vertical = 12.dp)
+            ) {
+                if (chatError.isNotBlank()) {
+                    item { AppText(chatError, color = Color(0xFFB00020), fontSize = 13.sp, modifier = Modifier.padding(bottom = 8.dp)) }
+                }
+                itemsIndexed(messages, key = { index, msg -> "${msg.id}-$index" }) { _, msg ->
                     Row(modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp), horizontalArrangement = if (msg.isMe) Arrangement.End else Arrangement.Start) {
                         Card(colors = CardDefaults.cardColors(containerColor = if (msg.isMe) TrainerAppNavy else Color.White), shape = RoundedCornerShape(16.dp), modifier = Modifier.fillMaxWidth(0.82f)) {
                             Column(Modifier.padding(12.dp)) {
@@ -3073,8 +4065,16 @@ private fun ChatDetailScreen(conversation: ChatConversation, token: String, cont
                             messages = messages + tempMsg
                             messageText = ""
                             sendChatMessageApi(context, token, conversation.id, clean,
-                                onSuccess = { isSending = false; fetchChatMessagesFromApi(context, token, conversation.id, onSuccess = { updated -> if (updated.isNotEmpty()) messages = updated }) },
-                                onError = { isSending = false }
+                                onSuccess = {
+                                    isSending = false
+                                    chatError = ""
+                                    fetchChatMessagesFromApi(
+                                        context, token, conversation.id,
+                                        onSuccess = { updated -> messages = updated },
+                                        onError = { chatError = it }
+                                    )
+                                },
+                                onError = { err -> isSending = false; chatError = err }
                             )
                         }
                     },
@@ -3086,48 +4086,7 @@ private fun ChatDetailScreen(conversation: ChatConversation, token: String, cont
                     else AppText("Odeslat", fontWeight = FontWeight.Bold)
                 }
             }
+            BottomNavigationBar(current = "chat", unreadChatCount = unreadChatCount, pendingCalendarCount = pendingCalendarCount, onNavigate = onNavigate)
         }
     }
-}
-
-private fun createDefaultConversations(athletes: List<AthleteItem>): List<ChatConversation> {
-    val admin = ChatConversation(
-        id = "admin",
-        name = "Administrátor TrainerApp",
-        subtitle = "Systémová podpora a administrace",
-        icon = "🛠️",
-        isAdmin = true,
-        unreadCount = 0,
-        initialMessages = listOf(
-            ChatMessage(
-                id = "1",
-                senderName = "Administrátor",
-                isMe = false,
-                isRead = false,
-                text = "Dobrý den! Vítáme vás v aplikaci TrainerApp.",
-                time = "09:00"
-            )
-        )
-    )
-    val athleteConvs = athletes.map { ath ->
-        ChatConversation(
-            id = ath.id,
-            name = ath.name,
-            subtitle = ath.email.ifBlank { "Sportovec" },
-            icon = "👤",
-            isAdmin = false,
-            unreadCount = 0,
-            initialMessages = listOf(
-                ChatMessage(
-                    id = "1",
-                    senderName = ath.name,
-                    isMe = false,
-                    isRead = false,
-                    text = "Dobrý den, posílám zprávu z aplikace.",
-                    time = "Nyní"
-                )
-            )
-        )
-    }
-    return listOf(admin) + athleteConvs
 }
